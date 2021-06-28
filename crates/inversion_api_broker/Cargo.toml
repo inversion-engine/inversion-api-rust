@@ -5,5 +5,7 @@ authors = ["neonphog <neonphog@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-rmp-serde = "0.14"
-serde = { version = "1", features = [ "derive" ] }
+nanoid = "0.4"
+parking_lot = "0.11.1"
+rmp-serde = "0.15"
+serde = { version = "1", features = [ "derive", "rc" ] }

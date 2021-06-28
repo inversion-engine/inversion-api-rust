@@ -1,0 +1,130 @@
+//! Type erasure helpers for passing data through the inversion api broker.
+
+use std::sync::Arc;
+use std::any::Any;
+use parking_lot::Mutex;
+
+/// message-pack encode
+fn rmp_encode<T: serde::Serialize>(t: &T) -> std::io::Result<Vec<u8>> {
+    let mut se = rmp_serde::encode::Serializer::new(Vec::new())
+        .with_struct_map()
+        .with_string_variants();
+    t.serialize(&mut se)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok(se.into_inner())
+}
+
+/// message-pack decode
+fn rmp_decode<T>(r: &[u8]) -> std::io::Result<T>
+where
+    for<'de> T: Sized + serde::Deserialize<'de>,
+{
+    let mut de = rmp_serde::decode::Deserializer::new(r);
+    T::deserialize(&mut de).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+/// Serializable that can be used as a trait-object
+pub trait InvSerializable {
+    /// Serialize this item into a Vec<u8>
+    fn inv_serialize(&self) -> std::io::Result<Vec<u8>>;
+}
+
+impl<T: serde::Serialize> InvSerializable for T {
+    fn inv_serialize(&self) -> std::io::Result<Vec<u8>> {
+        rmp_encode(self)
+    }
+}
+
+type InvSerCb = Arc<
+    dyn Fn() -> std::io::Result<Vec<u8>>
+    + 'static
+    + Send
+    + Sync
+>;
+
+enum InvAnyInner {
+    /// Already serialized item
+    Ser(Box<[u8]>),
+    /// A fat pointer to an item that is both Any and Serializable
+    Ptr {
+        p_any: Arc<dyn Any + 'static + Sync + Send>,
+        p_ser: InvSerCb,
+    },
+}
+
+/// transfer item with some optimizations to try to avoid serialization
+pub struct InvAny(InvAnyInner);
+
+impl InvAny {
+    /// constructor from bytes
+    pub fn from_bytes(b: Box<[u8]>) -> Self {
+        Self(InvAnyInner::Ser(b))
+    }
+
+    /// constructor
+    pub fn new<T>(t: T) -> Self
+    where
+        T: serde::Serialize + 'static + Send,
+    {
+        let p_any = Arc::new(Mutex::new(t));
+        let p_ser = p_any.clone();
+        let p_ser = Arc::new(move || {
+            p_ser.lock().inv_serialize()
+        });
+        Self(InvAnyInner::Ptr {
+            p_any,
+            p_ser,
+        })
+    }
+
+    /// downcast
+    pub fn downcast<T>(self) -> std::io::Result<T>
+    where
+        for<'de> T: serde::Deserialize<'de> + 'static + Send,
+    {
+        match self.0 {
+            InvAnyInner::Ser(b) => {
+                rmp_decode(&b)
+            }
+            InvAnyInner::Ptr { p_any, p_ser } => {
+                // first, try downcasting directly
+                if let Ok(p) = p_any.downcast::<Mutex<T>>() {
+                    drop(p_ser);
+                    if let Ok(p) = Arc::try_unwrap(p) {
+                        return Ok(p.into_inner());
+                    } else {
+                        // we managed the arc cloning with private variables
+                        // this shouldn't happen
+                        unreachable!();
+                    }
+                }
+                // otherwise, fall back to serialize / deserialize
+                let p = p_ser()?;
+                rmp_decode(&p)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transfer() {
+        #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+        struct Bob(i32);
+        #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+        struct Ned(i32);
+
+        let bob = Bob(42);
+        let bob = InvAny::new(bob);
+        let bob: Bob = bob.downcast().unwrap();
+        assert_eq!(Bob(42), bob);
+
+        let bob = Bob(42);
+        let bob = InvAny::new(bob);
+        let ned: Ned = bob.downcast().unwrap();
+        assert_eq!(Ned(42), ned);
+    }
+}
