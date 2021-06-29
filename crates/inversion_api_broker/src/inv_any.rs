@@ -1,8 +1,8 @@
 //! Type erasure helpers for passing data through the inversion api broker.
 
-use std::sync::Arc;
-use std::any::Any;
 use parking_lot::Mutex;
+use std::any::Any;
+use std::sync::Arc;
 
 /// message-pack encode
 fn rmp_encode<T: serde::Serialize>(t: &T) -> std::io::Result<Vec<u8>> {
@@ -23,24 +23,7 @@ where
     T::deserialize(&mut de).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
-/// Serializable that can be used as a trait-object
-pub trait InvSerializable {
-    /// Serialize this item into a Vec<u8>
-    fn inv_serialize(&self) -> std::io::Result<Vec<u8>>;
-}
-
-impl<T: serde::Serialize> InvSerializable for T {
-    fn inv_serialize(&self) -> std::io::Result<Vec<u8>> {
-        rmp_encode(self)
-    }
-}
-
-type InvSerCb = Arc<
-    dyn Fn() -> std::io::Result<Vec<u8>>
-    + 'static
-    + Send
-    + Sync
->;
+type InvSerCb = Arc<dyn Fn() -> std::io::Result<Vec<u8>> + 'static + Send + Sync>;
 
 enum InvAnyInner {
     /// Already serialized item
@@ -68,13 +51,8 @@ impl InvAny {
     {
         let p_any = Arc::new(Mutex::new(t));
         let p_ser = p_any.clone();
-        let p_ser = Arc::new(move || {
-            p_ser.lock().inv_serialize()
-        });
-        Self(InvAnyInner::Ptr {
-            p_any,
-            p_ser,
-        })
+        let p_ser = Arc::new(move || rmp_encode(&*p_ser.lock()));
+        Self(InvAnyInner::Ptr { p_any, p_ser })
     }
 
     /// downcast
@@ -83,9 +61,7 @@ impl InvAny {
         for<'de> T: serde::Deserialize<'de> + 'static + Send,
     {
         match self.0 {
-            InvAnyInner::Ser(b) => {
-                rmp_decode(&b)
-            }
+            InvAnyInner::Ser(b) => rmp_decode(&b),
             InvAnyInner::Ptr { p_any, p_ser } => {
                 // first, try downcasting directly
                 if let Ok(p) = p_any.downcast::<Mutex<T>>() {
@@ -111,7 +87,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_transfer() {
+    fn test_inv_any() {
         #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
         struct Bob(i32);
         #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
