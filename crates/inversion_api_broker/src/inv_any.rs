@@ -20,10 +20,12 @@ where
     for<'de> T: Sized + serde::Deserialize<'de>,
 {
     let mut de = rmp_serde::decode::Deserializer::new(r);
-    T::deserialize(&mut de).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    T::deserialize(&mut de)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
-type InvSerCb = Arc<dyn Fn() -> std::io::Result<Vec<u8>> + 'static + Send + Sync>;
+type InvSerCb =
+    Arc<dyn Fn() -> std::io::Result<Vec<u8>> + 'static + Send + Sync>;
 
 enum InvAnyInner {
     /// Already serialized item

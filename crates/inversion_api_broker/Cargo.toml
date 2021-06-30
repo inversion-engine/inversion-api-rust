@@ -10,3 +10,5 @@ nanoid = "0.4"
 parking_lot = "0.11.1"
 rmp-serde = "0.15"
 serde = { version = "1", features = [ "derive", "rc" ] }
+tokio = { version = "1.7.1", features = [ "full" ] }
+
