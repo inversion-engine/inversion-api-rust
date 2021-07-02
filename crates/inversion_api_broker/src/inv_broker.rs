@@ -3,6 +3,7 @@
 use crate::inv_any::InvAny;
 use crate::inv_id::InvId;
 use futures::future::{BoxFuture, FutureExt};
+use parking_lot::RwLock;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -61,13 +62,77 @@ pub struct ApiImplInner {
 /// impl type -- TODO use inversion-api-spec here, this is a standin
 pub type ApiImpl = Arc<ApiImplInner>;
 
-/// Publish one event to the remote end of a broker api
-pub type BoundApi<Evt> = Arc<
+/// You probably want to use BoundApi
+pub type DynBoundApi<Evt> = Arc<
     dyn Fn(Evt) -> BoxFuture<'static, std::io::Result<()>>
         + 'static
         + Send
         + Sync,
 >;
+
+/// Handle for publishing an event to some other logical actor.
+pub struct BoundApi<Evt: 'static + Send>(Arc<RwLock<Option<DynBoundApi<Evt>>>>);
+
+impl<Evt: 'static + Send> Clone for BoundApi<Evt> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<Evt: 'static + Send> BoundApi<Evt> {
+    /// Construct a new bound api handle via trait callback
+    pub fn new<Fut, F>(f: F) -> Self
+    where
+        Fut: Future<Output = std::io::Result<()>> + 'static + Send,
+        F: Fn(Evt) -> Fut + 'static + Send + Sync,
+    {
+        let f: DynBoundApi<Evt> = Arc::new(move |evt| f(evt).boxed());
+        Self::from_dyn(f)
+    }
+
+    /// Construct a new bound api handle via boxed callback
+    pub fn from_dyn(f: DynBoundApi<Evt>) -> Self {
+        Self(Arc::new(RwLock::new(Some(f))))
+    }
+
+    /// Has this channel been closed (underlying callback dropped)?
+    pub fn is_closed(&self) -> bool {
+        self.0.read().is_none()
+    }
+
+    /// Explicitly drop the underlying callback handle.
+    pub fn close(&self) {
+        self.0.write().take();
+    }
+
+    /// Emit an event to the remote logical actor.
+    /// If that actor returns a `ConnectionAborted` error, the
+    /// underlying callback handle will be dropped.
+    pub fn emit(
+        &self,
+        evt: Evt,
+    ) -> impl Future<Output = std::io::Result<()>> + 'static + Send {
+        let inner = self.0.clone();
+        async move {
+            let f = match inner.read().as_ref() {
+                Some(f) => f.clone(),
+                None => {
+                    return Err(std::io::ErrorKind::ConnectionAborted.into())
+                }
+            };
+            match f(evt).await {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    if matches!(e.kind(), std::io::ErrorKind::ConnectionAborted)
+                    {
+                        inner.write().take();
+                    }
+                    Err(e)
+                }
+            }
+        }
+    }
+}
 
 /// A broker api factory is like a virtual channel.
 /// Events can be emitted or received.
@@ -348,15 +413,16 @@ mod tests {
         broker.register_api(api_spec.clone()).await.unwrap();
 
         let factory: BoundApiFactory<InvAny, InvAny> = Arc::new(|evt_out| {
-            let evt_in: BoundApi<InvAny> = Arc::new(move |evt_in| {
-                let evt_out = evt_out.clone();
-                async move {
-                    let input: usize = evt_in.downcast()?;
-                    evt_out(InvAny::new(input + 1)).await?;
-                    Ok(())
-                }
-                .boxed()
-            });
+            let evt_in: BoundApi<InvAny> =
+                BoundApi::new(move |evt_in: InvAny| {
+                    let evt_out = evt_out.clone();
+                    async move {
+                        let input: usize = evt_in.downcast()?;
+                        evt_out.emit(InvAny::new(input + 1)).await?;
+                        Ok(())
+                    }
+                    .boxed()
+                });
             async move { Ok(evt_in) }.boxed()
         });
 
@@ -367,7 +433,7 @@ mod tests {
 
         let res = Arc::new(atomic::AtomicUsize::new(0));
         let res2 = res.clone();
-        let print_res: BoundApi<InvAny> = Arc::new(move |evt| {
+        let print_res: BoundApi<InvAny> = BoundApi::new(move |evt: InvAny| {
             let output: usize = evt.downcast().unwrap();
             println!("got: {}", output);
             res2.store(output, atomic::Ordering::SeqCst);
@@ -375,7 +441,7 @@ mod tests {
         });
 
         let evt = broker.bind_to_impl(api_impl, print_res).await.unwrap();
-        evt(InvAny::new(42)).await.unwrap();
+        evt.emit(InvAny::new(42)).await.unwrap();
         assert_eq!(43, res.load(atomic::Ordering::SeqCst));
     }
 }

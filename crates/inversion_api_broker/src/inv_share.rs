@@ -46,7 +46,7 @@ impl<T: 'static + Send> InvShare<T> {
     {
         let mut t = self.0.lock();
         if t.is_none() {
-            return Err(std::io::ErrorKind::NotConnected.into());
+            return Err(std::io::ErrorKind::ConnectionAborted.into());
         }
         let mut close = false;
         let r = f(t.as_mut().unwrap(), &mut close);
