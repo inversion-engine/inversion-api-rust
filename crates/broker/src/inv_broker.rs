@@ -344,7 +344,7 @@ struct PrivBroker(Arc<crate::inv_share::InvShare<PrivBrokerInner>>);
 
 impl PrivBroker {
     fn new() -> Self {
-        Self(Arc::new(crate::inv_share::InvShare::new(
+        Self(Arc::new(crate::inv_share::InvShare::new_rw_lock(
             PrivBrokerInner::new(),
         )))
     }
