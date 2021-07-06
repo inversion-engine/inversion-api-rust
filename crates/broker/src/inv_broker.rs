@@ -2,8 +2,8 @@
 
 use crate::inv_any::InvAny;
 use crate::inv_id::InvId;
+use crate::inv_share::InvShare;
 use futures::future::{BoxFuture, FutureExt};
-use parking_lot::RwLock;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -62,7 +62,7 @@ pub struct ApiImplInner {
 /// impl type -- TODO use inversion-api-spec here, this is a standin
 pub type ApiImpl = Arc<ApiImplInner>;
 
-/// You probably want to use BoundApi
+/// Function signature for creating a new BoundApi instance.
 pub type DynBoundApi<Evt> = Arc<
     dyn Fn(Evt) -> BoxFuture<'static, std::io::Result<()>>
         + 'static
@@ -71,7 +71,7 @@ pub type DynBoundApi<Evt> = Arc<
 >;
 
 /// Handle for publishing an event to some other logical actor.
-pub struct BoundApi<Evt: 'static + Send>(Arc<RwLock<Option<DynBoundApi<Evt>>>>);
+pub struct BoundApi<Evt: 'static + Send>(InvShare<DynBoundApi<Evt>>);
 
 impl<Evt: 'static + Send> Clone for BoundApi<Evt> {
     fn clone(&self) -> Self {
@@ -92,17 +92,17 @@ impl<Evt: 'static + Send> BoundApi<Evt> {
 
     /// Construct a new bound api handle via boxed callback
     pub fn from_dyn(f: DynBoundApi<Evt>) -> Self {
-        Self(Arc::new(RwLock::new(Some(f))))
+        Self(InvShare::new_rw_lock(f))
     }
 
     /// Has this channel been closed (underlying callback dropped)?
     pub fn is_closed(&self) -> bool {
-        self.0.read().is_none()
+        self.0.is_closed()
     }
 
     /// Explicitly drop the underlying callback handle.
     pub fn close(&self) {
-        self.0.write().take();
+        self.0.close()
     }
 
     /// Emit an event to the remote logical actor.
@@ -114,18 +114,13 @@ impl<Evt: 'static + Send> BoundApi<Evt> {
     ) -> impl Future<Output = std::io::Result<()>> + 'static + Send {
         let inner = self.0.clone();
         async move {
-            let f = match inner.read().as_ref() {
-                Some(f) => f.clone(),
-                None => {
-                    return Err(std::io::ErrorKind::ConnectionAborted.into())
-                }
-            };
+            let f = inner.share_ref(|i| Ok(i.clone()))?;
             match f(evt).await {
                 Ok(r) => Ok(r),
                 Err(e) => {
                     if matches!(e.kind(), std::io::ErrorKind::ConnectionAborted)
                     {
-                        inner.write().take();
+                        inner.close();
                     }
                     Err(e)
                 }
@@ -134,9 +129,8 @@ impl<Evt: 'static + Send> BoundApi<Evt> {
     }
 }
 
-/// A broker api factory is like a virtual channel.
-/// Events can be emitted or received.
-pub type BoundApiFactory<EvtIn, EvtOut> = Arc<
+/// Function signature for creating a new BoundApiFactory instance.
+pub type DynBoundApiFactory<EvtIn, EvtOut> = Arc<
     dyn Fn(
             BoundApi<EvtOut>,
         ) -> BoxFuture<'static, std::io::Result<BoundApi<EvtIn>>>
@@ -144,6 +138,81 @@ pub type BoundApiFactory<EvtIn, EvtOut> = Arc<
         + Send
         + Sync,
 >;
+
+/// A broker api factory is like a virtual channel.
+/// Events can be emitted or received.
+pub struct BoundApiFactory<EvtIn, EvtOut>(
+    InvShare<DynBoundApiFactory<EvtIn, EvtOut>>,
+)
+where
+    EvtIn: 'static + Send,
+    EvtOut: 'static + Send;
+
+impl<EvtIn, EvtOut> Clone for BoundApiFactory<EvtIn, EvtOut>
+where
+    EvtIn: 'static + Send,
+    EvtOut: 'static + Send,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<EvtIn, EvtOut> BoundApiFactory<EvtIn, EvtOut>
+where
+    EvtIn: 'static + Send,
+    EvtOut: 'static + Send,
+{
+    /// Construct a new bound api handle via trait callback
+    pub fn new<Fut, F>(f: F) -> Self
+    where
+        Fut: Future<Output = std::io::Result<BoundApi<EvtIn>>> + 'static + Send,
+        F: Fn(BoundApi<EvtOut>) -> Fut + 'static + Send + Sync,
+    {
+        let f: DynBoundApiFactory<EvtIn, EvtOut> =
+            Arc::new(move |evt_out| f(evt_out).boxed());
+        Self::from_dyn(f)
+    }
+
+    /// Construct a new bound api handle via boxed callback
+    pub fn from_dyn(f: DynBoundApiFactory<EvtIn, EvtOut>) -> Self {
+        Self(InvShare::new_rw_lock(f))
+    }
+
+    /// Has this channel been closed (underlying callback dropped)?
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
+    /// Explicitly drop the underlying callback handle.
+    pub fn close(&self) {
+        self.0.close()
+    }
+
+    /// Bind an api with this BoundApiFactory instance.
+    pub fn bind(
+        &self,
+        evt_out: BoundApi<EvtOut>,
+    ) -> impl Future<Output = std::io::Result<BoundApi<EvtIn>>> + 'static + Send
+    {
+        let inner = self.0.clone();
+        async move {
+            let f = inner.share_ref(|i| Ok(i.clone()))?;
+            match f(evt_out).await {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    if matches!(e.kind(), std::io::ErrorKind::ConnectionAborted)
+                    {
+                        // TODO - we must also close both sides
+                        // of all ALL CHILDREN BoundApi instances.
+                        inner.close();
+                    }
+                    Err(e)
+                }
+            }
+        }
+    }
+}
 
 /// inversion broker trait
 pub trait AsInvBroker: 'static + Send + Sync {
@@ -382,7 +451,7 @@ impl AsInvBroker for PrivBroker {
             .share_mut(move |i, _| i.api_registry.check_bind_to_impl(api_impl));
         async move {
             let factory = factory?;
-            factory(evt_out).await
+            factory.bind(evt_out).await
         }
         .boxed()
     }
@@ -412,19 +481,20 @@ mod tests {
 
         broker.register_api(api_spec.clone()).await.unwrap();
 
-        let factory: BoundApiFactory<InvAny, InvAny> = Arc::new(|evt_out| {
-            let evt_in: BoundApi<InvAny> =
-                BoundApi::new(move |evt_in: InvAny| {
-                    let evt_out = evt_out.clone();
-                    async move {
-                        let input: usize = evt_in.downcast()?;
-                        evt_out.emit(InvAny::new(input + 1)).await?;
-                        Ok(())
-                    }
-                    .boxed()
-                });
-            async move { Ok(evt_in) }.boxed()
-        });
+        let factory: BoundApiFactory<InvAny, InvAny> =
+            BoundApiFactory::new(|evt_out| {
+                let evt_in: BoundApi<InvAny> =
+                    BoundApi::new(move |evt_in: InvAny| {
+                        let evt_out = evt_out.clone();
+                        async move {
+                            let input: usize = evt_in.downcast()?;
+                            evt_out.emit(InvAny::new(input + 1)).await?;
+                            Ok(())
+                        }
+                        .boxed()
+                    });
+                async move { Ok(evt_in) }.boxed()
+            });
 
         broker
             .register_impl(api_impl.clone(), factory)
