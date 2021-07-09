@@ -1,5 +1,6 @@
 //! InvUniq uuid-like identifier, using base58 alphabet.
 
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 
 /// InvUniq uuid-like identifier, using base58 alphabet.
@@ -15,6 +16,9 @@ use std::sync::Arc;
 )]
 pub struct InvUniq(Arc<String>);
 
+static INV_UNIQ_EVT: Lazy<InvUniq> =
+    Lazy::new(|| InvUniq(Arc::new("111111111111111111111111".to_string())));
+
 impl Default for InvUniq {
     fn default() -> Self {
         Self::raw_new(PrivKind::Rand)
@@ -23,26 +27,43 @@ impl Default for InvUniq {
 
 impl InvUniq {
     /// Construct a new completely random uniq
-    pub fn new() -> Self {
+    /// The odds of this being an "evt" type are pretty much nill.
+    /// The odds of this being "req"/"res" type are 50 / 50.
+    pub fn new_rand() -> Self {
         Self::raw_new(PrivKind::Rand)
     }
 
-    /// Construct a new random uniq with a single bit flag
-    pub fn new_flag(flag: bool) -> Self {
-        if flag {
-            Self::raw_new(PrivKind::FlagOn)
-        } else {
-            Self::raw_new(PrivKind::FlagOff)
-        }
+    /// Construct a new "evt" type uniq
+    /// Note, this isn't really uniq, it is all '1's.
+    pub fn new_evt() -> Self {
+        INV_UNIQ_EVT.clone()
     }
 
-    /// If this uniq was constructed with a flag, was that flag set?
-    /// If this uniq was constructed without a flag, this fn will be random.
-    pub fn get_flag(&self) -> bool {
-        B58B.iter()
-            .position(|&x| x == self.0.as_bytes()[23])
-            .unwrap()
-            >= 29
+    /// Construct a new "req" type uniq
+    pub fn new_req() -> Self {
+        Self::raw_new(PrivKind::FlagOn)
+    }
+
+    /// Construct a new "res" type uniq
+    pub fn new_res() -> Self {
+        Self::raw_new(PrivKind::FlagOff)
+    }
+
+    /// Returns `true` if this uniq is "evt" type.
+    pub fn is_evt(&self) -> bool {
+        self == &*INV_UNIQ_EVT
+    }
+
+    /// Returns `true` if this uniq is "req" type.
+    /// If this uniq was constructed with `new_rand` this will be random.
+    pub fn is_req(&self) -> bool {
+        !self.is_evt() && self.is_flag()
+    }
+
+    /// Returns `true` if this uniq is "req" type.
+    /// If this uniq was constructed with `new_rand` this will be random.
+    pub fn is_res(&self) -> bool {
+        !self.is_evt() && !self.is_flag()
     }
 }
 
@@ -102,6 +123,13 @@ impl InvUniq {
         }
         Self(Arc::new(String::from_utf8_lossy(&out).to_string()))
     }
+
+    fn is_flag(&self) -> bool {
+        B58B.iter()
+            .position(|&x| x == self.0.as_bytes()[23])
+            .unwrap()
+            >= 29
+    }
 }
 
 #[cfg(test)]
@@ -124,7 +152,7 @@ mod tests {
         let mut got_one_off = false;
         for _ in 0..200 {
             let id = InvUniq::default();
-            if id.get_flag() {
+            if id.is_req() {
                 got_one_on = true;
             } else {
                 got_one_off = true;
@@ -133,12 +161,12 @@ mod tests {
         assert!(got_one_on);
         assert!(got_one_off);
         for _ in 0..200 {
-            let id = InvUniq::new_flag(true);
-            assert!(id.get_flag());
+            let id = InvUniq::new_req();
+            assert!(id.is_req());
         }
         for _ in 0..200 {
-            let id = InvUniq::new_flag(false);
-            assert!(!id.get_flag());
+            let id = InvUniq::new_res();
+            assert!(id.is_res());
         }
     }
 }

@@ -3,6 +3,7 @@
 use crate::inv_any::InvAny;
 use crate::inv_id::InvId;
 use crate::inv_share::InvShare;
+use crate::inv_uniq::InvUniq;
 use futures::future::{BoxFuture, FutureExt};
 use std::future::Future;
 use std::sync::Arc;
@@ -186,6 +187,8 @@ where
 
     /// Explicitly drop the underlying callback handle.
     pub fn close(&self) {
+        // TODO - we must also close both sides
+        // of all ALL CHILDREN BoundApi instances.
         self.0.close()
     }
 
@@ -214,6 +217,64 @@ where
     }
 }
 
+/// inversion broker message
+#[non_exhaustive]
+pub struct InvBrokerMsg {
+    /// Message Id
+    pub id: InvUniq,
+
+    /// Message Content
+    pub msg: InvAny,
+
+    // TODO - add capability checking data
+}
+
+impl InvBrokerMsg {
+    /// construct a new "evt" type message
+    pub fn new_evt(msg: InvAny) -> Self {
+        Self {
+            id: InvUniq::new_evt(),
+            msg,
+        }
+    }
+
+    /// construct a new "req" type message
+    pub fn new_req(msg: InvAny) -> Self {
+        Self {
+            id: InvUniq::new_req(),
+            msg,
+        }
+    }
+
+    /// construct a new "res" type message
+    pub fn new_res(msg: InvAny) -> Self {
+        Self {
+            id: InvUniq::new_res(),
+            msg,
+        }
+    }
+
+    /// `true` if this message is "evt" type.
+    pub fn is_evt(&self) -> bool {
+        self.id.is_evt()
+    }
+
+    /// `true` if this message is "req" type.
+    pub fn is_req(&self) -> bool {
+        self.id.is_req()
+    }
+
+    /// `true` if this message is "res" type.
+    pub fn is_res(&self) -> bool {
+        self.id.is_res()
+    }
+
+    /// extract the message content from this struct.
+    pub fn into_msg(self) -> InvAny {
+        self.msg
+    }
+}
+
 /// inversion broker trait
 pub trait AsInvBroker: 'static + Send + Sync {
     /// Register a new api to this broker
@@ -226,15 +287,15 @@ pub trait AsInvBroker: 'static + Send + Sync {
     fn register_impl(
         &self,
         api_impl: ApiImpl,
-        factory: BoundApiFactory<InvAny, InvAny>,
+        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
     ) -> BoxFuture<'static, std::io::Result<()>>;
 
     /// Bind to a registered api implementation
     fn bind_to_impl(
         &self,
         api_impl: ApiImpl,
-        evt_out: BoundApi<InvAny>,
-    ) -> BoxFuture<'static, std::io::Result<BoundApi<InvAny>>>;
+        evt_out: BoundApi<InvBrokerMsg>,
+    ) -> BoxFuture<'static, std::io::Result<BoundApi<InvBrokerMsg>>>;
 }
 
 /// inversion broker type handle
@@ -251,7 +312,7 @@ impl AsInvBroker for InvBroker {
     fn register_impl(
         &self,
         api_impl: ApiImpl,
-        factory: BoundApiFactory<InvAny, InvAny>,
+        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
     ) -> BoxFuture<'static, std::io::Result<()>> {
         AsInvBroker::register_impl(&*self.0, api_impl, factory)
     }
@@ -259,8 +320,8 @@ impl AsInvBroker for InvBroker {
     fn bind_to_impl(
         &self,
         api_impl: ApiImpl,
-        evt_out: BoundApi<InvAny>,
-    ) -> BoxFuture<'static, std::io::Result<BoundApi<InvAny>>> {
+        evt_out: BoundApi<InvBrokerMsg>,
+    ) -> BoxFuture<'static, std::io::Result<BoundApi<InvBrokerMsg>>> {
         AsInvBroker::bind_to_impl(&*self.0, api_impl, evt_out)
     }
 }
@@ -278,7 +339,7 @@ impl InvBroker {
     pub fn register_impl(
         &self,
         api_impl: ApiImpl,
-        factory: BoundApiFactory<InvAny, InvAny>,
+        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
     ) -> impl Future<Output = std::io::Result<()>> + 'static + Send {
         AsInvBroker::register_impl(self, api_impl, factory)
     }
@@ -287,8 +348,8 @@ impl InvBroker {
     pub fn bind_to_impl(
         &self,
         api_impl: ApiImpl,
-        evt_out: BoundApi<InvAny>,
-    ) -> impl Future<Output = std::io::Result<BoundApi<InvAny>>> {
+        evt_out: BoundApi<InvBrokerMsg>,
+    ) -> impl Future<Output = std::io::Result<BoundApi<InvBrokerMsg>>> {
         AsInvBroker::bind_to_impl(self, api_impl, evt_out)
     }
 }
@@ -303,7 +364,7 @@ pub fn new_broker() -> InvBroker {
 use std::collections::HashMap;
 
 struct ImplRegistry {
-    map: HashMap<ApiImpl, BoundApiFactory<InvAny, InvAny>>,
+    map: HashMap<ApiImpl, BoundApiFactory<InvBrokerMsg, InvBrokerMsg>>,
 }
 
 impl ImplRegistry {
@@ -316,7 +377,7 @@ impl ImplRegistry {
     pub fn check_add_impl(
         &mut self,
         api_impl: ApiImpl,
-        factory: BoundApiFactory<InvAny, InvAny>,
+        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
     ) -> std::io::Result<()> {
         match self.map.entry(api_impl) {
             std::collections::hash_map::Entry::Occupied(_) => {
@@ -335,7 +396,7 @@ impl ImplRegistry {
     pub fn check_bind_to_impl(
         &self,
         api_impl: ApiImpl,
-    ) -> std::io::Result<BoundApiFactory<InvAny, InvAny>> {
+    ) -> std::io::Result<BoundApiFactory<InvBrokerMsg, InvBrokerMsg>> {
         match self.map.get(&api_impl) {
             Some(factory) => Ok(factory.clone()),
             None => Err(std::io::ErrorKind::InvalidInput.into()),
@@ -372,7 +433,7 @@ impl ApiRegistry {
     pub fn check_add_impl(
         &mut self,
         api_impl: ApiImpl,
-        factory: BoundApiFactory<InvAny, InvAny>,
+        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
     ) -> std::io::Result<()> {
         match self.map.get_mut(&api_impl.api_spec) {
             Some(map) => {
@@ -389,7 +450,7 @@ impl ApiRegistry {
     pub fn check_bind_to_impl(
         &self,
         api_impl: ApiImpl,
-    ) -> std::io::Result<BoundApiFactory<InvAny, InvAny>> {
+    ) -> std::io::Result<BoundApiFactory<InvBrokerMsg, InvBrokerMsg>> {
         match self.map.get(&api_impl.api_spec) {
             Some(map) => map.check_bind_to_impl(api_impl),
             None => Err(std::io::ErrorKind::InvalidInput.into()),
@@ -433,7 +494,7 @@ impl AsInvBroker for PrivBroker {
     fn register_impl(
         &self,
         api_impl: ApiImpl,
-        factory: BoundApiFactory<InvAny, InvAny>,
+        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
     ) -> BoxFuture<'static, std::io::Result<()>> {
         let r = self.0.share_mut(move |i, _| {
             i.api_registry.check_add_impl(api_impl, factory)
@@ -444,8 +505,8 @@ impl AsInvBroker for PrivBroker {
     fn bind_to_impl(
         &self,
         api_impl: ApiImpl,
-        evt_out: BoundApi<InvAny>,
-    ) -> BoxFuture<'static, std::io::Result<BoundApi<InvAny>>> {
+        evt_out: BoundApi<InvBrokerMsg>,
+    ) -> BoxFuture<'static, std::io::Result<BoundApi<InvBrokerMsg>>> {
         let factory = self
             .0
             .share_mut(move |i, _| i.api_registry.check_bind_to_impl(api_impl));
@@ -481,14 +542,16 @@ mod tests {
 
         broker.register_api(api_spec.clone()).await.unwrap();
 
-        let factory: BoundApiFactory<InvAny, InvAny> =
+        let factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg> =
             BoundApiFactory::new(|evt_out| {
-                let evt_in: BoundApi<InvAny> =
-                    BoundApi::new(move |evt_in: InvAny| {
+                let evt_in: BoundApi<InvBrokerMsg> =
+                    BoundApi::new(move |evt_in: InvBrokerMsg| {
                         let evt_out = evt_out.clone();
                         async move {
-                            let input: usize = evt_in.downcast()?;
-                            evt_out.emit(InvAny::new(input + 1)).await?;
+                            let input: usize = evt_in.into_msg().downcast()?;
+                            let msg =
+                                InvBrokerMsg::new_evt(InvAny::new(input + 1));
+                            evt_out.emit(msg).await?;
                             Ok(())
                         }
                         .boxed()
@@ -503,15 +566,17 @@ mod tests {
 
         let res = Arc::new(atomic::AtomicUsize::new(0));
         let res2 = res.clone();
-        let print_res: BoundApi<InvAny> = BoundApi::new(move |evt: InvAny| {
-            let output: usize = evt.downcast().unwrap();
-            println!("got: {}", output);
-            res2.store(output, atomic::Ordering::SeqCst);
-            async move { Ok(()) }.boxed()
-        });
+        let print_res: BoundApi<InvBrokerMsg> =
+            BoundApi::new(move |evt: InvBrokerMsg| {
+                let output: usize = evt.into_msg().downcast().unwrap();
+                println!("got: {}", output);
+                res2.store(output, atomic::Ordering::SeqCst);
+                async move { Ok(()) }.boxed()
+            });
 
         let evt = broker.bind_to_impl(api_impl, print_res).await.unwrap();
-        evt.emit(InvAny::new(42)).await.unwrap();
+        let msg = InvBrokerMsg::new_evt(InvAny::new(42));
+        evt.emit(msg).await.unwrap();
         assert_eq!(43, res.load(atomic::Ordering::SeqCst));
     }
 }
