@@ -275,6 +275,43 @@ impl InvBrokerMsg {
     }
 }
 
+/// Typed wrapper around a generic InvBroker api.
+pub struct BoundApiHandle<T: 'static + Send>(pub BoundApi<InvBrokerMsg>, std::marker::PhantomData<&'static T>);
+
+impl<T: 'static + Send> Clone for BoundApiHandle<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), std::marker::PhantomData)
+    }
+}
+
+impl<T: 'static + Send> BoundApiHandle<T> {
+    /// Construct a new BoundApiHandle
+    pub fn new(inner: BoundApi<InvBrokerMsg>) -> Self {
+        Self(inner, std::marker::PhantomData)
+    }
+
+    /// Has this channel been closed?
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
+    /// Explicitly close this channel.
+    pub fn close(&self) {
+        self.0.close()
+    }
+
+    /// Emit an event to the remote logical actor.
+    pub fn emit(
+        &self,
+        evt: T,
+    ) -> impl Future<Output = std::io::Result<()>> + 'static + Send
+    where
+        T: serde::Serialize,
+    {
+        self.0.emit(InvBrokerMsg::new_evt(InvAny::new(evt)))
+    }
+}
+
 /// inversion broker trait
 pub trait AsInvBroker: 'static + Send + Sync {
     /// Register a new api to this broker
