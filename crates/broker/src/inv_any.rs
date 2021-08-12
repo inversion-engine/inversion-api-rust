@@ -1,31 +1,29 @@
 //! Type erasure helpers for passing data through the inversion api broker.
 
+use crate::inv_error::*;
 use parking_lot::Mutex;
 use std::any::Any;
 use std::sync::Arc;
 
 /// message-pack encode
-fn rmp_encode<T: serde::Serialize>(t: &T) -> std::io::Result<Vec<u8>> {
+fn rmp_encode<T: serde::Serialize>(t: &T) -> InvResult<Vec<u8>> {
     let mut se = rmp_serde::encode::Serializer::new(Vec::new())
         .with_struct_map()
         .with_string_variants();
-    t.serialize(&mut se)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    t.serialize(&mut se).map_err(InvError::other)?;
     Ok(se.into_inner())
 }
 
 /// message-pack decode
-fn rmp_decode<T>(r: &[u8]) -> std::io::Result<T>
+fn rmp_decode<T>(r: &[u8]) -> InvResult<T>
 where
     for<'de> T: Sized + serde::Deserialize<'de>,
 {
     let mut de = rmp_serde::decode::Deserializer::new(r);
-    T::deserialize(&mut de)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    T::deserialize(&mut de).map_err(InvError::other)
 }
 
-type InvSerCb =
-    Arc<dyn Fn() -> std::io::Result<Vec<u8>> + 'static + Send + Sync>;
+type InvSerCb = Arc<dyn Fn() -> InvResult<Vec<u8>> + 'static + Send + Sync>;
 
 enum InvAnyInner {
     /// Already serialized item
@@ -58,7 +56,7 @@ impl InvAny {
     }
 
     /// downcast
-    pub fn downcast<T>(self) -> std::io::Result<T>
+    pub fn downcast<T>(self) -> InvResult<T>
     where
         for<'de> T: serde::Deserialize<'de> + 'static + Send,
     {

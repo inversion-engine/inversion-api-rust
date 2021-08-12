@@ -13,12 +13,12 @@ use std::sync::Arc;
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct InvId(Arc<Box<str>>);
+pub struct InvId(Arc<str>);
 
 impl InvId {
     /// inversion id constructor
     pub fn new_raw(s: Box<str>) -> Self {
-        Self(Arc::new(s))
+        Self(s.into())
     }
 
     /// construct a new anonymous InvId

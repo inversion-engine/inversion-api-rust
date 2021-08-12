@@ -5,6 +5,9 @@
 
 pub mod inv_any;
 pub mod inv_broker;
+pub mod inv_error;
 pub mod inv_id;
 pub mod inv_share;
 pub mod inv_uniq;
+
+pub use inv_error::*;

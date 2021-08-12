@@ -14,10 +14,10 @@ use std::sync::Arc;
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct InvUniq(Arc<String>);
+pub struct InvUniq(Arc<str>);
 
 static INV_UNIQ_EVT: Lazy<InvUniq> =
-    Lazy::new(|| InvUniq(Arc::new("111111111111111111111111".to_string())));
+    Lazy::new(|| InvUniq("evt".to_string().into_boxed_str().into()));
 
 impl Default for InvUniq {
     fn default() -> Self {
@@ -34,7 +34,7 @@ impl InvUniq {
     }
 
     /// Construct a new "evt" type uniq
-    /// Note, this isn't really uniq, it is all '1's.
+    /// Note, this isn't really unique, it is exactly the literal bytes "evt".
     pub fn new_evt() -> Self {
         INV_UNIQ_EVT.clone()
     }
@@ -54,16 +54,31 @@ impl InvUniq {
         self == &*INV_UNIQ_EVT
     }
 
-    /// Returns `true` if this uniq is "req" type.
+    /// Returns `true` if this uniq is "req"uest type.
     /// If this uniq was constructed with `new_rand` this will be random.
     pub fn is_req(&self) -> bool {
         !self.is_evt() && self.is_flag()
     }
 
-    /// Returns `true` if this uniq is "req" type.
+    /// Returns `true` if this uniq is "res"ponse type.
     /// If this uniq was constructed with `new_rand` this will be random.
     pub fn is_res(&self) -> bool {
         !self.is_evt() && !self.is_flag()
+    }
+
+    /// Deterministically convert this "req"uest into a "res"ponse.
+    pub fn as_res(&self) -> Self {
+        let mut out = self.0.as_bytes().to_vec();
+        let idx = B58B.iter().position(|&x| x == out[23]).unwrap();
+        if idx >= 29 {
+            out[23] = B58B[idx - 29];
+        }
+        Self(
+            String::from_utf8_lossy(&out)
+                .to_string()
+                .into_boxed_str()
+                .into(),
+        )
     }
 }
 
@@ -121,10 +136,16 @@ impl InvUniq {
                 }
             }
         }
-        Self(Arc::new(String::from_utf8_lossy(&out).to_string()))
+        Self(
+            String::from_utf8_lossy(&out)
+                .to_string()
+                .into_boxed_str()
+                .into(),
+        )
     }
 
     fn is_flag(&self) -> bool {
+        // TODO - lookup table for this
         B58B.iter()
             .position(|&x| x == self.0.as_bytes()[23])
             .unwrap()

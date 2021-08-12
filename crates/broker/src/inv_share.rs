@@ -1,5 +1,6 @@
 //! Synchronized droppable share-lock around internal state data.
 
+use crate::inv_error::*;
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic;
 use std::sync::Arc;
@@ -43,9 +44,9 @@ impl<T: 'static + Send> InvShare<T> {
     }
 
     /// Execute code with read-only access to the internal state.
-    pub fn share_ref<R, F>(&self, f: F) -> std::io::Result<R>
+    pub fn share_ref<R, F>(&self, f: F) -> InvResult<R>
     where
-        F: FnOnce(&T) -> std::io::Result<R>,
+        F: FnOnce(&T) -> InvResult<R>,
     {
         let guard = self.0.get_ref();
         if guard.is_none() {
@@ -58,9 +59,9 @@ impl<T: 'static + Send> InvShare<T> {
     /// The second param, if set to true, will drop the shared state,
     /// any further access will `Err(ConnectionAborted)`.
     /// E.g. `share.share_mut(|_state, close| *close = true).unwrap();`
-    pub fn share_mut<R, F>(&self, f: F) -> std::io::Result<R>
+    pub fn share_mut<R, F>(&self, f: F) -> InvResult<R>
     where
-        F: FnOnce(&mut T, &mut bool) -> std::io::Result<R>,
+        F: FnOnce(&mut T, &mut bool) -> InvResult<R>,
     {
         let mut guard = self.0.get_mut();
         if guard.is_none() {
