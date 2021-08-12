@@ -205,7 +205,7 @@ impl RawReceiver {
 /// A static callback instance that can be used to close this channel.
 /// (Generally, this is used on the receiver side, since it is straight-forward
 /// to close the channel from the sender side).
-pub type RawClose = Arc<dyn Fn() + 'static + Send>;
+pub type RawClose = Arc<dyn Fn() + 'static + Send + Sync>;
 
 /// Create a raw, low-level channel.
 pub fn raw_channel() -> (
@@ -426,7 +426,7 @@ pub type UnitypedReceiver<T> = TypedReceiver<T, T, T>;
 
 /// Given bi-directional raw handles to a remote (one sender, one receiver),
 /// set up a typed, request/response enabled high-level channel.
-pub async fn upgrade_raw_channel<
+pub fn upgrade_raw_channel<
     EvtSend,
     ReqSend,
     ResSend,
@@ -434,13 +434,18 @@ pub async fn upgrade_raw_channel<
     ReqRecv,
     ResRecv,
 >(
+    // TODO - make a concrete PendingSender future type
+    //        so we can eliminate this impl in argument position
+    //        which prevents us from turbo-fishing the types...
     raw_sender: impl Future<Output = InvResult<RawSender>> + 'static + Send,
     raw_receiver: RawReceiver,
     raw_recv_close: RawClose,
-) -> InvResult<(
-    TypedSender<EvtSend, ReqSend, ResSend>,
+) -> (
+    impl Future<Output = InvResult<TypedSender<EvtSend, ReqSend, ResSend>>>
+        + 'static
+        + Send,
     TypedReceiver<EvtRecv, ReqRecv, ResRecv>,
-)>
+)
 where
     EvtSend: serde::Serialize + 'static + Send,
     ReqSend: serde::Serialize + 'static + Send,
@@ -511,13 +516,17 @@ where
         });
     }
 
-    let raw_sender = raw_sender.await?;
+    let send_fut = async move {
+        let raw_sender = raw_sender.await?;
 
-    let typed_sender = TypedSender {
-        raw_sender,
-        raw_recv_close,
-        pending,
-        _phantom: std::marker::PhantomData,
+        let typed_sender = TypedSender {
+            raw_sender,
+            raw_recv_close,
+            pending,
+            _phantom: std::marker::PhantomData,
+        };
+
+        Ok(typed_sender)
     };
 
     let typed_receiver = TypedReceiver {
@@ -525,19 +534,25 @@ where
         _phantom: std::marker::PhantomData,
     };
 
-    Ok((typed_sender, typed_receiver))
+    (send_fut, typed_receiver)
 }
 
 /// Delegates to `upgrade_raw_channel` but with the same type for all types.
-pub async fn unitype_upgrade_raw_channel<T>(
+pub fn unitype_upgrade_raw_channel<T>(
+    // TODO - make a concrete PendingSender future type
+    //        so we can eliminate this impl in argument position
+    //        which prevents us from turbo-fishing the types...
     raw_sender: impl Future<Output = InvResult<RawSender>> + 'static + Send,
     raw_receiver: RawReceiver,
     raw_recv_close: RawClose,
-) -> InvResult<(UnitypedSender<T>, UnitypedReceiver<T>)>
+) -> (
+    impl Future<Output = InvResult<UnitypedSender<T>>> + 'static + Send,
+    UnitypedReceiver<T>,
+)
 where
     for<'de> T: serde::Serialize + serde::Deserialize<'de> + 'static + Send,
 {
-    upgrade_raw_channel(raw_sender, raw_receiver, raw_recv_close).await
+    upgrade_raw_channel(raw_sender, raw_receiver, raw_recv_close)
 }
 
 // --- old version --- //
@@ -1031,6 +1046,58 @@ mod tests {
     use super::*;
     use crate::inv_id::InvId;
     use std::sync::atomic;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_chan() {
+        let (snd1, recv2, c2) = raw_channel();
+        let (snd2, recv1, c1) = raw_channel();
+
+        let (snd1, recv1): (_, UnitypedReceiver<u32>) =
+            unitype_upgrade_raw_channel(snd1, recv1, c1);
+
+        recv1.handle(move |incoming| async move {
+            match incoming {
+                TypedIncoming::Event(evt) => {
+                    println!("got: {:?}", evt);
+                    assert_eq!(69, evt);
+                }
+                TypedIncoming::Request(data, respond) => {
+                    respond.respond(data + 1).await;
+                }
+            }
+            Ok(())
+        });
+
+        let (snd2, recv2): (_, UnitypedReceiver<u32>) =
+            unitype_upgrade_raw_channel(snd2, recv2, c2);
+
+        recv2.handle(move |incoming| async move {
+            match incoming {
+                TypedIncoming::Event(evt) => {
+                    println!("got: {:?}", evt);
+                    assert_eq!(42, evt);
+                }
+                TypedIncoming::Request(data, respond) => {
+                    respond.respond(data - 1).await;
+                }
+            }
+            Ok(())
+        });
+
+        let snd1 = snd1.await.unwrap();
+        let snd2 = snd2.await.unwrap();
+
+        snd1.emit(42).await.unwrap();
+        snd2.emit(69).await.unwrap();
+
+        let res = snd1.request(42).await.unwrap();
+        println!("got: {:?}", res);
+        assert_eq!(41, res);
+
+        let res = snd2.request(42).await.unwrap();
+        println!("got: {:?}", res);
+        assert_eq!(43, res);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_inv_broker() {
