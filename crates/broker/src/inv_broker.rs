@@ -8,8 +8,6 @@ use futures::future::{BoxFuture, FutureExt};
 use std::future::Future;
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
-
 trait PrivAsSpec: 'static + Send + Sync {
     fn as_any(&self) -> &(dyn std::any::Any + 'static + Send + Sync);
     fn obj_debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
@@ -147,17 +145,23 @@ type PrivRawSender = Arc<
         + Sync,
 >;
 
+struct PrivRawCleanup {
+    raw_close: RawClose,
+}
+
+impl Drop for PrivRawCleanup {
+    fn drop(&mut self) {
+        (self.raw_close)();
+    }
+}
+
 /// The sender side of a raw channel must be able to invoke the
 /// receiver side closure. In order to decouple the timing of
 /// specifying the receive logic, and to manage closing the channel,
-/// we use this `Option<Shared<_>>` type.
-type PrivRawSenderFut = Arc<
-    RwLock<
-        Option<
-            futures::future::Shared<
-                BoxFuture<'static, InvResult<PrivRawSender>>,
-            >,
-        >,
+/// we use this `InvShare<Shared<_>>` type.
+type PrivRawSenderFut = InvShare<
+    futures::future::Shared<
+        BoxFuture<'static, InvResult<(PrivRawSender, Arc<PrivRawCleanup>)>>,
     >,
 >;
 
@@ -166,9 +170,21 @@ type PrivRawSenderFut = Arc<
 /// to close the channel from the sender side).
 pub type RawClose = Arc<dyn Fn() + 'static + Send + Sync>;
 
+fn run_once<F>(f: F) -> RawClose
+where
+    F: FnOnce() + 'static + Send + Sync,
+{
+    let inner = InvShare::new_mutex(f);
+    Arc::new(move || {
+        if let Some(inner) = inner.extract() {
+            inner();
+        }
+    })
+}
+
 /// The raw, low-level sender side of a raw_channel.
 #[derive(Clone)]
-pub struct RawSender(RawClose, PrivRawSenderFut);
+pub struct RawSender(PrivRawSenderFut);
 
 impl RawSender {
     /// Send a message to the remote end of this channel.
@@ -177,13 +193,14 @@ impl RawSender {
         id: InvUniq,
         data: InvAny,
     ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        let raw_close = self.0.clone();
-        let inner = self.1.clone();
+        let inner = self.0.clone();
         async move {
             // first, get the Shared<_> type, if we have not been closed
-            let raw_sender = match &*inner.read() {
-                Some(raw_sender) => raw_sender.clone(),
-                None => return Err(std::io::ErrorKind::ConnectionReset.into()),
+            let raw_sender = match inner.share_ref(|i| Ok(i.clone())) {
+                Ok(raw_sender) => raw_sender.clone(),
+                Err(_) => {
+                    return Err(std::io::ErrorKind::ConnectionReset.into())
+                }
             };
 
             match async move {
@@ -193,7 +210,7 @@ impl RawSender {
                     async move {
                         // wait on the receive logic closure receiver
                         // i.e. someone calls receiver.handle()
-                        let raw_sender = raw_sender.await?;
+                        let (raw_sender, _) = raw_sender.await?;
 
                         // actually invoke the receiver closure
                         raw_sender(id, data).await
@@ -210,7 +227,7 @@ impl RawSender {
                     // the channel to free up resources...
                     // Application layer errors should be encoded in the
                     // raw type so they don't trigger this.
-                    raw_close();
+                    inner.close();
                     Err(e)
                 }
             }
@@ -219,12 +236,12 @@ impl RawSender {
 
     /// Has this channel been closed?
     pub fn is_closed(&self) -> bool {
-        self.1.read().is_none()
+        self.0.is_closed()
     }
 
     /// Close this channel from the sender side.
     pub fn close(&self) {
-        (self.0)()
+        self.0.close();
     }
 }
 
@@ -254,37 +271,56 @@ pub fn raw_channel() -> (RawSender, RawReceiver, RawClose) {
     // setup the channel to forward the receive logic to the sender side
     let (fn_send, fn_recv) = tokio::sync::oneshot::channel::<PrivRawSender>();
 
-    // wrap up the receive side so it can be held by multiple clones of
-    // the sender side
-    let fn_recv: PrivRawSenderFut = {
-        let kill_notify = kill_notify.clone();
-        Arc::new(RwLock::new(Some(async move {
-            futures::select_biased! {
-                res = fn_recv.fuse() => {
-                    res.map_err(|_| std::io::ErrorKind::ConnectionReset.into())
-                }
-                _ = kill_notify.notified().fuse() => {
-                    Err(std::io::ErrorKind::ConnectionReset.into())
-                }
-            }
-        }.boxed().shared())))
-    };
+    let (inner, inner_init) = InvShare::new_rw_lock_delayed();
 
     // bundle up a callback for closing this channel
     let raw_close = {
-        let fn_recv = fn_recv.clone();
-        Arc::new(move || {
-            *fn_recv.write() = None;
+        let inner = inner.clone();
+        let kill_notify = kill_notify.clone();
+        run_once(move || {
+            inner.close();
             kill_notify.notify_waiters();
         })
     };
 
+    // wrap up the receive side so it can be held by multiple clones of
+    // the sender side
+    let priv_raw_cleanup = Arc::new(PrivRawCleanup {
+        raw_close: raw_close.clone(),
+    });
+    inner_init(async move {
+        futures::select_biased! {
+            res = fn_recv.fuse() => {
+                let s = res.map_err(|_| InvError::from(std::io::ErrorKind::ConnectionReset))?;
+                Ok((s, priv_raw_cleanup))
+            }
+            _ = kill_notify.notified().fuse() => {
+                Err(std::io::ErrorKind::ConnectionReset.into())
+            }
+        }
+    }.boxed().shared());
+
     // return the components
-    (
-        RawSender(raw_close.clone(), fn_recv),
-        RawReceiver(fn_send),
-        raw_close,
-    )
+    (RawSender(inner), RawReceiver(fn_send), raw_close)
+}
+
+struct PrivTypedCleanup {
+    close_all: RawClose,
+}
+
+impl Drop for PrivTypedCleanup {
+    fn drop(&mut self) {
+        (self.close_all)();
+    }
+}
+
+type PrivPendingMap =
+    InvShare<HashMap<InvUniq, tokio::sync::oneshot::Sender<InvAny>>>;
+
+struct TypedSenderInner {
+    raw_sender: RawSender,
+    _cleanup: PrivTypedCleanup,
+    pending: PrivPendingMap,
 }
 
 /// Send typed events, or make typed requests of the remote api.
@@ -294,9 +330,7 @@ where
     ReqSend: serde::Serialize + 'static + Send,
     for<'de> ResSend: serde::Deserialize<'de> + 'static + Send,
 {
-    raw_sender: RawSender,
-    raw_recv_close: RawClose,
-    pending: Arc<Mutex<HashMap<InvUniq, tokio::sync::oneshot::Sender<InvAny>>>>,
+    inner: InvShare<TypedSenderInner>,
     _phantom: std::marker::PhantomData<&'static (EvtSend, ReqSend, ResSend)>,
 }
 
@@ -308,9 +342,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            raw_sender: self.raw_sender.clone(),
-            raw_recv_close: self.raw_recv_close.clone(),
-            pending: self.pending.clone(),
+            inner: self.inner.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -327,7 +359,17 @@ where
         &self,
         data: EvtSend,
     ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        self.raw_sender.send(InvUniq::new_evt(), InvAny::new(data))
+        let inner = self.inner.clone();
+        async move {
+            let raw_sender = inner.share_ref(|i| Ok(i.raw_sender.clone()))?;
+            match raw_sender.send(InvUniq::new_evt(), InvAny::new(data)).await {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    inner.close();
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Make a request of the remote side of this channel.
@@ -335,46 +377,46 @@ where
         &self,
         data: ReqSend,
     ) -> impl Future<Output = InvResult<ResSend>> + 'static + Send {
-        // before we build up the pending instances, check if we're open.
-        if self.raw_sender.is_closed() {
-            return async move {
-                Err(std::io::ErrorKind::ConnectionReset.into())
-            }.boxed();
-        }
-
-        // build up and insert pending info
-        let req_id = InvUniq::new_req();
-        let res_id = req_id.as_res();
-        let (resp_send, resp_recv) = tokio::sync::oneshot::channel();
-        let resp_recv =
-            tokio::time::timeout(std::time::Duration::from_secs(30), resp_recv);
-        self.pending.lock().insert(res_id.clone(), resp_send);
-
-        // setup a cleanup raii guard
-        struct Cleanup {
-            res_id: InvUniq,
-            pending: Arc<
-                Mutex<HashMap<InvUniq, tokio::sync::oneshot::Sender<InvAny>>>,
-            >,
-        }
-
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = self.pending.lock().remove(&self.res_id);
-            }
-        }
-
-        let cleanup = Cleanup {
-            res_id,
-            pending: self.pending.clone(),
-        };
-
-        // send the request and await the response
-        let fut = self.raw_sender.send(req_id, InvAny::new(data));
+        let inner = self.inner.clone();
         async move {
-            let _cleanup = cleanup;
+            // before we build up the pending instances, check if we're open.
+            let (raw_sender, pending) = inner
+                .share_ref(|i| Ok((i.raw_sender.clone(), i.pending.clone())))?;
 
-            fut.await?;
+            // build up and insert pending info
+            let req_id = InvUniq::new_req();
+            let res_id = req_id.as_res();
+            let (resp_send, resp_recv) = tokio::sync::oneshot::channel();
+            let resp_recv = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                resp_recv,
+            );
+            let res_id2 = res_id.clone();
+            pending.share_mut(move |i, _| {
+                i.insert(res_id2, resp_send);
+                Ok(())
+            })?;
+
+            // setup a cleanup raii guard
+            struct Cleanup {
+                res_id: InvUniq,
+                pending: PrivPendingMap,
+            }
+
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let res_id = self.res_id.clone();
+                    let _ = self.pending.share_mut(move |i, _| {
+                        i.remove(&res_id);
+                        Ok(())
+                    });
+                }
+            }
+
+            let _cleanup = Cleanup { res_id, pending };
+
+            // send the request and await the response
+            raw_sender.send(req_id, InvAny::new(data)).await?;
 
             let data = resp_recv
                 .await
@@ -389,14 +431,16 @@ where
                 Err(std::io::ErrorKind::InvalidData.into())
             }
         }
-        .boxed()
+    }
+
+    /// Has this bi-directional channel been closed?
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
     }
 
     /// Close this bi-directional channel.
     pub fn close(&self) {
-        self.raw_sender.close();
-        (self.raw_recv_close)();
-        self.pending.lock().clear();
+        self.inner.close();
     }
 }
 
@@ -448,7 +492,8 @@ where
 {
     raw_sender: RawSender,
     raw_receiver: RawReceiver,
-    pending: Arc<Mutex<HashMap<InvUniq, tokio::sync::oneshot::Sender<InvAny>>>>,
+    close_all: RawClose,
+    pending: PrivPendingMap,
     _phantom: std::marker::PhantomData<&'static (EvtRecv, ReqRecv, ResRecv)>,
 }
 
@@ -470,6 +515,7 @@ where
         let Self {
             raw_sender,
             raw_receiver,
+            close_all,
             pending,
             ..
         } = self;
@@ -477,7 +523,21 @@ where
         let f: PrivTypedSender<EvtRecv, ReqRecv, ResRecv> =
             Arc::new(move |res| f(res).boxed());
 
+        // raii guard to shutdown sender (everything) if receiver is closed
+        struct Cleanup {
+            close_all: RawClose,
+        }
+
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                (self.close_all)();
+            }
+        }
+
+        let cleanup = Cleanup { close_all };
+
         raw_receiver.handle(move |id, data| {
+            let _cleanup = &cleanup;
             let raw_sender = raw_sender.clone();
             let f = f.clone();
             let pending = pending.clone();
@@ -506,7 +566,9 @@ where
                     }
                 } else {
                     // must be a response
-                    if let Some(respond) = pending.lock().remove(&id) {
+                    if let Ok(Some(respond)) =
+                        pending.share_mut(|i, _| Ok(i.remove(&id)))
+                    {
                         let _ = respond.send(data);
                     }
                     Ok(())
@@ -541,20 +603,35 @@ where
     for<'de> ReqRecv: serde::Deserialize<'de> + 'static + Send,
     ResRecv: serde::Serialize + 'static + Send,
 {
-    let pending: Arc<
-        Mutex<HashMap<InvUniq, tokio::sync::oneshot::Sender<InvAny>>>,
-    > = Arc::new(Mutex::new(HashMap::new()));
+    let pending: PrivPendingMap = InvShare::new_mutex(HashMap::new());
+
+    let close_all: RawClose = {
+        let raw_sender = raw_sender.clone();
+        let pending = pending.clone();
+        run_once(move || {
+            raw_sender.close();
+            raw_recv_close();
+            pending.close();
+        })
+    };
+
+    let priv_typed_cleanup = PrivTypedCleanup {
+        close_all: close_all.clone(),
+    };
 
     let typed_sender = TypedSender {
-        raw_sender: raw_sender.clone(),
-        raw_recv_close,
-        pending: pending.clone(),
+        inner: InvShare::new_rw_lock(TypedSenderInner {
+            raw_sender: raw_sender.clone(),
+            _cleanup: priv_typed_cleanup,
+            pending: pending.clone(),
+        }),
         _phantom: std::marker::PhantomData,
     };
 
     let typed_receiver = TypedReceiver {
         raw_sender,
         raw_receiver,
+        close_all,
         pending,
         _phantom: std::marker::PhantomData,
     };
@@ -1116,7 +1193,7 @@ mod tests {
         recv1.handle(move |incoming| async move {
             match incoming {
                 TypedIncoming::Event(evt) => {
-                    println!("got: {:?}", evt);
+                    println!("evt: {:?}", evt);
                     assert_eq!(69, evt);
                 }
                 TypedIncoming::Request(data, respond) => {
@@ -1131,7 +1208,7 @@ mod tests {
         recv2.handle(move |incoming| async move {
             match incoming {
                 TypedIncoming::Event(evt) => {
-                    println!("got: {:?}", evt);
+                    println!("evt: {:?}", evt);
                     assert_eq!(42, evt);
                 }
                 TypedIncoming::Request(data, respond) => {
@@ -1145,11 +1222,11 @@ mod tests {
         snd2.emit(69).await.unwrap();
 
         let res = snd1.request(42).await.unwrap();
-        println!("got: {:?}", res);
+        println!("res: {:?}", res);
         assert_eq!(41, res);
 
         let res = snd2.request(42).await.unwrap();
-        println!("got: {:?}", res);
+        println!("res: {:?}", res);
         assert_eq!(43, res);
     }
 

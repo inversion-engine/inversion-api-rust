@@ -1,5 +1,5 @@
-#![forbid(unsafe_code)]
-#![forbid(missing_docs)]
+#![deny(unsafe_code)]
+#![deny(missing_docs)]
 #![deny(warnings)]
 //! Core crates for loading and communicating with inversion api implementations in the Rust programming language.
 
