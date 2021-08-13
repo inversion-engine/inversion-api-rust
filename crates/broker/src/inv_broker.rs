@@ -5,135 +5,41 @@ use crate::inv_error::*;
 use crate::inv_share::InvShare;
 use crate::inv_uniq::InvUniq;
 use futures::future::{BoxFuture, FutureExt};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-trait PrivAsSpec: 'static + Send + Sync {
-    fn as_any(&self) -> &(dyn std::any::Any + 'static + Send + Sync);
-    fn obj_debug(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
-    fn obj_eq(&self, oth: &dyn PrivAsSpec) -> bool;
-    fn obj_partial_cmp(
-        &self,
-        oth: &dyn PrivAsSpec,
-    ) -> Option<std::cmp::Ordering>;
-    fn obj_cmp(&self, oth: &dyn PrivAsSpec) -> std::cmp::Ordering;
-    fn obj_hash(&self, state: &mut dyn std::hash::Hasher);
+/// Trait defining the specific ApiSpec type a broker will work with.
+pub trait AsApiSpec:
+    'static
+    + Sized
+    + Send
+    + Sync
+    + std::fmt::Debug
+    + Clone
+    + PartialEq
+    + Eq
+    + std::hash::Hash
+{
 }
 
-/// Type erased Spec type, to be used both for ApiSpec and ImplSpec.
-#[derive(Clone)]
-pub struct Spec(Arc<dyn PrivAsSpec>);
+/// Trait defining the specify ImplSpec type a broker will work with.
+pub trait AsImplSpec:
+    'static
+    + Sized
+    + Send
+    + Sync
+    + std::fmt::Debug
+    + Clone
+    + PartialEq
+    + Eq
+    + std::hash::Hash
+{
+    /// Get the api spec type that will be referenced by this ImplSpec.
+    type ApiSpec: AsApiSpec;
 
-impl std::fmt::Debug for Spec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.obj_debug(f)
-    }
-}
-
-impl PartialEq for Spec {
-    fn eq(&self, oth: &Self) -> bool {
-        self.0.obj_eq(&*oth.0)
-    }
-}
-
-impl Eq for Spec {}
-
-impl PartialOrd for Spec {
-    fn partial_cmp(&self, oth: &Self) -> Option<std::cmp::Ordering> {
-        self.0.obj_partial_cmp(&*oth.0)
-    }
-}
-
-impl Ord for Spec {
-    fn cmp(&self, oth: &Self) -> std::cmp::Ordering {
-        self.0.obj_cmp(&*oth.0)
-    }
-}
-
-impl std::hash::Hash for Spec {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.obj_hash(state);
-    }
-}
-
-impl Spec {
-    /// Generate a new type-erased "Spec" instance from a compatible
-    /// concrete type.
-    pub fn new<T>(t: T) -> Self
-    where
-        T: 'static
-            + std::fmt::Debug
-            + std::hash::Hash
-            + PartialEq
-            + Eq
-            + PartialOrd
-            + Ord
-            + Send
-            + Sync,
-    {
-        struct X<T>(T)
-        where
-            T: 'static
-                + std::fmt::Debug
-                + std::hash::Hash
-                + PartialEq
-                + Eq
-                + PartialOrd
-                + Ord
-                + Send
-                + Sync;
-        impl<T> PrivAsSpec for X<T>
-        where
-            T: 'static
-                + std::fmt::Debug
-                + std::hash::Hash
-                + PartialEq
-                + Eq
-                + PartialOrd
-                + Ord
-                + Send
-                + Sync,
-        {
-            fn as_any(&self) -> &(dyn std::any::Any + 'static + Send + Sync) {
-                self
-            }
-
-            fn obj_debug(
-                &self,
-                f: &mut std::fmt::Formatter<'_>,
-            ) -> std::fmt::Result {
-                self.0.fmt(f)
-            }
-
-            fn obj_eq(&self, oth: &dyn PrivAsSpec) -> bool {
-                if let Some(r) = oth.as_any().downcast_ref::<Self>() {
-                    self.0.eq(&r.0)
-                } else {
-                    false
-                }
-            }
-
-            fn obj_partial_cmp(
-                &self,
-                oth: &dyn PrivAsSpec,
-            ) -> Option<std::cmp::Ordering> {
-                Some(self.obj_cmp(oth))
-            }
-
-            fn obj_cmp(&self, oth: &dyn PrivAsSpec) -> std::cmp::Ordering {
-                if let Some(r) = oth.as_any().downcast_ref::<Self>() {
-                    self.0.cmp(&r.0)
-                } else {
-                    panic!("Attempted to Ord::cmp() a differing type");
-                }
-            }
-
-            fn obj_hash(&self, state: &mut dyn std::hash::Hasher) {
-                self.0.hash(&mut Box::new(state));
-            }
-        }
-        Self(Arc::new(X(t)))
-    }
+    /// Get the api spec this Impl spec is claiming to implement.
+    fn api_spec(&self) -> &Self::ApiSpec;
 }
 
 /// Closure type for logic to be used to handle
@@ -657,8 +563,27 @@ where
     upgrade_raw_channel(raw_sender, raw_receiver, raw_recv_close)
 }
 
+/// inversion broker trait
+pub trait AsInvBroker<S: AsImplSpec>: 'static + Send + Sync {
+    /*
+    /// Register a new api impl to this broker
+    fn register_impl(
+        &self,
+        api_impl: S,
+        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
+    ) -> BoxFuture<'static, InvResult<()>>;
+    */
+
+    /// Bind to a registered api implementation
+    fn bind_to_impl_raw(
+        &self,
+        spec: S,
+    ) -> BoxFuture<'static, InvResult<(RawSender, RawReceiver, RawClose)>>;
+}
+
 // --- old version --- //
 
+/*
 /// Function signature for creating a new BoundApi instance.
 pub type DynBoundApi<Evt> = Arc<
     dyn Fn(Evt) -> BoxFuture<'static, InvResult<()>> + 'static + Send + Sync,
@@ -990,7 +915,6 @@ pub fn new_broker() -> InvBroker {
 
 // -- private -- //
 
-use std::collections::HashMap;
 
 struct ImplRegistry {
     map: HashMap<Spec, BoundApiFactory<InvBrokerMsg, InvBrokerMsg>>,
@@ -1142,12 +1066,13 @@ impl AsInvBroker for PrivBroker {
         .boxed()
     }
 }
+*/
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inv_id::InvId;
-    use std::sync::atomic;
+    //use crate::inv_id::InvId;
+    //use std::sync::atomic;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_raw_channel() {
@@ -1230,6 +1155,7 @@ mod tests {
         assert_eq!(43, res);
     }
 
+    /*
     #[tokio::test(flavor = "multi_thread")]
     async fn test_inv_broker() {
         let api = Spec::new(InvId::new_anon());
@@ -1277,4 +1203,5 @@ mod tests {
         evt.emit(msg).await.unwrap();
         assert_eq!(43, res.load(atomic::Ordering::SeqCst));
     }
+    */
 }
