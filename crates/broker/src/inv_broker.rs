@@ -9,37 +9,76 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-/// Trait defining the specific ApiSpec type a broker will work with.
-pub trait AsApiSpec:
-    'static
-    + Sized
-    + Send
-    + Sync
-    + std::fmt::Debug
-    + Clone
-    + PartialEq
-    + Eq
-    + std::hash::Hash
-{
+/// Spec representing an Inversion API.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct ApiSpec {
+    /// top level categorization.
+    pub category1: Box<str>,
+
+    /// sub level categorization.
+    pub category2: Box<str>,
+
+    /// api name.
+    pub api_name: Box<str>,
+
+    /// api revision.
+    pub api_revision: u32,
 }
 
-/// Trait defining the specify ImplSpec type a broker will work with.
-pub trait AsImplSpec:
-    'static
-    + Sized
-    + Send
-    + Sync
-    + std::fmt::Debug
-    + Clone
-    + PartialEq
-    + Eq
-    + std::hash::Hash
-{
-    /// Get the api spec type that will be referenced by this ImplSpec.
-    type ApiSpec: AsApiSpec;
+impl Default for ApiSpec {
+    fn default() -> Self {
+        Self {
+            category1: "anon".to_string().into_boxed_str(),
+            category2: "anon".to_string().into_boxed_str(),
+            api_name: format!("{}", InvUniq::new_rand()).into_boxed_str(),
+            api_revision: 0,
+        }
+    }
+}
 
-    /// Get the api spec this Impl spec is claiming to implement.
-    fn api_spec(&self) -> &Self::ApiSpec;
+impl std::fmt::Display for ApiSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}.{}",
+            self.category1, self.category2, self.api_name, self.api_revision,
+        )
+    }
+}
+
+/// Spec representing an Inversion API implementation.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct ImplSpec {
+    /// Api spec this impl is implementing.
+    pub api_spec: ApiSpec,
+
+    /// The name of this implementation.
+    pub impl_name: Box<str>,
+
+    /// The revision of this implementation.
+    pub impl_revision: u32,
+}
+
+impl Default for ImplSpec {
+    fn default() -> Self {
+        Self {
+            api_spec: ApiSpec::default(),
+            impl_name: format!("{}", InvUniq::new_rand()).into_boxed_str(),
+            impl_revision: 0,
+        }
+    }
+}
+
+impl std::fmt::Display for ImplSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}",
+            self.api_spec, self.impl_name, self.impl_revision,
+        )
+    }
 }
 
 /// Closure type for logic to be used to handle
@@ -564,7 +603,7 @@ where
 }
 
 /// inversion broker trait
-pub trait AsInvBroker<S: AsImplSpec>: 'static + Send + Sync {
+pub trait AsInvBroker: 'static + Send + Sync {
     /*
     /// Register a new api impl to this broker
     fn register_impl(
@@ -577,7 +616,7 @@ pub trait AsInvBroker<S: AsImplSpec>: 'static + Send + Sync {
     /// Bind to a registered api implementation
     fn bind_to_impl_raw(
         &self,
-        spec: S,
+        impl_spec: ImplSpec,
     ) -> BoxFuture<'static, InvResult<(RawSender, RawReceiver, RawClose)>>;
 }
 
@@ -1073,6 +1112,12 @@ mod tests {
     use super::*;
     //use crate::inv_id::InvId;
     //use std::sync::atomic;
+
+    #[test]
+    fn test_specs() {
+        let spec = ImplSpec::default();
+        println!("{}: {:#?}", spec, spec);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_raw_channel() {
