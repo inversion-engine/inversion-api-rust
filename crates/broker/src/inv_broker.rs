@@ -9,30 +9,66 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
+/// Status of a particular Feature Definition in an ApiSpec.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FeatureSpecStatus {
+    /// This is a proposed, unstable feature.
+    /// It may or may not function, and the api
+    /// may change between revisions.
+    Unstable,
+
+    /// This is a stable feature.
+    /// Implementations claiming this API SPEC REVISION
+    /// *MUST* implement this feature as defined.
+    Stable,
+
+    /// This previously stable feature is no longer required.
+    /// Implementations claiming this API SPEC REVISION
+    /// *MAY* report this feature as not implemented.
+    Deprecated,
+}
+
+/// Feature Definition for ApiSpec.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureDef {
+    /// The short reference name for this feature.
+    pub feature_name: Box<str>,
+
+    /// The implementation status of this feature.
+    pub feature_status: FeatureSpecStatus,
+}
+
 /// Spec representing an Inversion API.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiSpec {
     /// top level categorization.
-    pub category1: Box<str>,
+    pub api_cat1: Box<str>,
 
     /// sub level categorization.
-    pub category2: Box<str>,
+    pub api_cat2: Box<str>,
 
     /// api name.
     pub api_name: Box<str>,
 
     /// api revision.
     pub api_revision: u32,
+
+    /// feature list associated with this spec.
+    pub api_features: Box<[FeatureDef]>,
 }
 
 impl Default for ApiSpec {
     fn default() -> Self {
         Self {
-            category1: "anon".to_string().into_boxed_str(),
-            category2: "anon".to_string().into_boxed_str(),
+            api_cat1: "anon".to_string().into_boxed_str(),
+            api_cat2: "anon".to_string().into_boxed_str(),
             api_name: format!("{}", InvUniq::new_rand()).into_boxed_str(),
             api_revision: 0,
+            api_features: Box::new([]),
         }
     }
 }
@@ -41,15 +77,16 @@ impl std::fmt::Display for ApiSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}.{}.{}.{}",
-            self.category1, self.category2, self.api_name, self.api_revision,
+            "inv.{}.{}.{}.{}",
+            self.api_cat1, self.api_cat2, self.api_name, self.api_revision,
         )
     }
 }
 
 /// Spec representing an Inversion API implementation.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImplSpec {
     /// Api spec this impl is implementing.
     pub api_spec: ApiSpec,
@@ -59,6 +96,9 @@ pub struct ImplSpec {
 
     /// The revision of this implementation.
     pub impl_revision: u32,
+
+    /// feature impl list associated with this spec.
+    pub impl_features: Box<[Box<str>]>,
 }
 
 impl Default for ImplSpec {
@@ -67,6 +107,7 @@ impl Default for ImplSpec {
             api_spec: ApiSpec::default(),
             impl_name: format!("{}", InvUniq::new_rand()).into_boxed_str(),
             impl_revision: 0,
+            impl_features: Box::new([]),
         }
     }
 }
@@ -1115,8 +1156,29 @@ mod tests {
 
     #[test]
     fn test_specs() {
-        let spec = ImplSpec::default();
+        let spec = ImplSpec {
+            api_spec: ApiSpec {
+                api_features: Box::new([
+                    FeatureDef {
+                        feature_name: "readRaw".to_string().into_boxed_str(),
+                        feature_status: FeatureSpecStatus::Deprecated,
+                    },
+                    FeatureDef {
+                        feature_name: "readBytes".to_string().into_boxed_str(),
+                        feature_status: FeatureSpecStatus::Stable,
+                    },
+                    FeatureDef {
+                        feature_name: "writeBytes".to_string().into_boxed_str(),
+                        feature_status: FeatureSpecStatus::Unstable,
+                    },
+                ]),
+                ..Default::default()
+            },
+            impl_features: Box::new(["readBytes".to_string().into_boxed_str()]),
+            ..Default::default()
+        };
         println!("{}: {:#?}", spec, spec);
+        println!("{}", serde_yaml::to_string(&spec).unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
