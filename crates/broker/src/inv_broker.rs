@@ -770,11 +770,7 @@ where
 }
 
 type PrivFactorySender = Arc<
-    dyn Fn(
-            RawSender,
-            RawReceiver,
-            RawClose,
-        ) -> BoxFuture<'static, InvResult<()>>
+    dyn Fn(RawSender, RawReceiver, RawClose) -> InvResult<()>
         + 'static
         + Send
         + Sync,
@@ -785,13 +781,15 @@ pub struct FactoryReceiver(ImplSpec, InvShare<PrivBrokerInner>);
 
 impl FactoryReceiver {
     /// Specify the logic that will be applied on receipt of incoming bindings.
-    pub fn handle<Fut, F>(self, f: F)
+    pub fn handle<F>(self, f: F)
     where
-        Fut: Future<Output = InvResult<()>> + 'static + Send,
-        F: Fn(RawSender, RawReceiver, RawClose) -> Fut + 'static + Send + Sync,
+        F: Fn(RawSender, RawReceiver, RawClose) -> InvResult<()>
+            + 'static
+            + Send
+            + Sync,
     {
         let Self(impl_spec, inner) = self;
-        let s: PrivFactorySender = Arc::new(move |s, r, c| f(s, r, c).boxed());
+        let s: PrivFactorySender = Arc::new(f);
         let n = inner
             .share_mut(move |i, _| match i.map.entry(impl_spec) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {
@@ -940,7 +938,7 @@ impl AsInvBroker for PrivBroker {
             let (raw_send1, raw_recv2, raw_close2) = raw_channel();
             let (raw_send2, raw_recv1, raw_close1) = raw_channel();
 
-            sender(raw_send1, raw_recv1, raw_close1).await?;
+            sender(raw_send1, raw_recv1, raw_close1)?;
 
             Ok((raw_send2, raw_recv2, raw_close2))
         }
@@ -1069,7 +1067,7 @@ mod tests {
         let broker = new_broker();
 
         let f = broker.register_impl_raw(impl_spec.clone()).await.unwrap();
-        f.handle(|s, r, c| async move {
+        f.handle(|s, r, c| {
             let (s, r) = unitype_upgrade_raw_channel::<isize>(s, r, c);
             let s2 = s.clone();
             tokio::task::spawn(async move {
