@@ -10,7 +10,16 @@ use std::future::Future;
 use std::sync::Arc;
 
 /// Status of a particular Feature Definition in an ApiSpec.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum FeatureSpecStatus {
     /// This is a proposed, unstable feature.
@@ -30,8 +39,7 @@ pub enum FeatureSpecStatus {
 }
 
 /// Feature Definition for ApiSpec.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FeatureDef {
     /// The short reference name for this feature.
     pub feature_name: Box<str>,
@@ -40,11 +48,46 @@ pub struct FeatureDef {
     pub feature_status: FeatureSpecStatus,
 }
 
+impl serde::Serialize for FeatureDef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = (&self.feature_name, &self.feature_status);
+        s.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for FeatureDef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let d: (Box<str>, FeatureSpecStatus) =
+            serde::Deserialize::deserialize(deserializer)?;
+        Ok(Self {
+            feature_name: d.0,
+            feature_status: d.1,
+        })
+    }
+}
+
+impl std::fmt::Display for FeatureDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self).unwrap())
+    }
+}
+
+impl std::fmt::Debug for FeatureDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string_pretty(&self).unwrap())
+    }
+}
+
 /// Spec representing an Inversion API.
 #[non_exhaustive]
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApiSpec {
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ApiSpecInner {
     /// top level categorization.
     pub api_cat1: Box<str>,
 
@@ -61,33 +104,78 @@ pub struct ApiSpec {
     pub api_features: Box<[FeatureDef]>,
 }
 
-impl Default for ApiSpec {
+impl Default for ApiSpecInner {
     fn default() -> Self {
         Self {
-            api_cat1: "anon".to_string().into_boxed_str(),
-            api_cat2: "anon".to_string().into_boxed_str(),
-            api_name: format!("{}", InvUniq::new_rand()).into_boxed_str(),
+            api_cat1: "anon".into(),
+            api_cat2: "anon".into(),
+            api_name: format!("{}", InvUniq::new_rand()).into(),
             api_revision: 0,
             api_features: Box::new([]),
         }
     }
 }
 
-impl std::fmt::Display for ApiSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "inv.{}.{}.{}.{}",
-            self.api_cat1, self.api_cat2, self.api_name, self.api_revision,
-        )
+impl serde::Serialize for ApiSpecInner {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = (
+            "invApiSpec",
+            &self.api_cat1,
+            &self.api_cat2,
+            &self.api_name,
+            &self.api_revision,
+            &self.api_features,
+        );
+        s.serialize(serializer)
     }
 }
 
+impl<'de> serde::Deserialize<'de> for ApiSpecInner {
+    #[allow(clippy::type_complexity)]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let d: (
+            Box<str>,
+            Box<str>,
+            Box<str>,
+            Box<str>,
+            u32,
+            Box<[FeatureDef]>,
+        ) = serde::Deserialize::deserialize(deserializer)?;
+        Ok(Self {
+            api_cat1: d.1,
+            api_cat2: d.2,
+            api_name: d.3,
+            api_revision: d.4,
+            api_features: d.5,
+        })
+    }
+}
+
+impl std::fmt::Display for ApiSpecInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self).unwrap())
+    }
+}
+
+impl std::fmt::Debug for ApiSpecInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string_pretty(&self).unwrap())
+    }
+}
+
+/// Inversion Api ApiSpec type.
+pub type ApiSpec = Arc<ApiSpecInner>;
+
 /// Spec representing an Inversion API implementation.
 #[non_exhaustive]
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImplSpec {
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImplSpecInner {
     /// Api spec this impl is implementing.
     pub api_spec: ApiSpec,
 
@@ -101,26 +189,64 @@ pub struct ImplSpec {
     pub impl_features: Box<[Box<str>]>,
 }
 
-impl Default for ImplSpec {
+impl Default for ImplSpecInner {
     fn default() -> Self {
         Self {
             api_spec: ApiSpec::default(),
-            impl_name: format!("{}", InvUniq::new_rand()).into_boxed_str(),
+            impl_name: format!("{}", InvUniq::new_rand()).into(),
             impl_revision: 0,
             impl_features: Box::new([]),
         }
     }
 }
 
-impl std::fmt::Display for ImplSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}",
-            self.api_spec, self.impl_name, self.impl_revision,
-        )
+impl serde::Serialize for ImplSpecInner {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = (
+            "invImplSpec",
+            &self.api_spec,
+            &self.impl_name,
+            &self.impl_revision,
+            &self.impl_features,
+        );
+        s.serialize(serializer)
     }
 }
+
+impl<'de> serde::Deserialize<'de> for ImplSpecInner {
+    #[allow(clippy::type_complexity)]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let d: (Box<str>, ApiSpec, Box<str>, u32, Box<[Box<str>]>) =
+            serde::Deserialize::deserialize(deserializer)?;
+        Ok(Self {
+            api_spec: d.1,
+            impl_name: d.2,
+            impl_revision: d.3,
+            impl_features: d.4,
+        })
+    }
+}
+
+impl std::fmt::Display for ImplSpecInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(&self).unwrap())
+    }
+}
+
+impl std::fmt::Debug for ImplSpecInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string_pretty(&self).unwrap())
+    }
+}
+
+/// Inversion Api ImplSpec type.
+pub type ImplSpec = Arc<ImplSpecInner>;
 
 /// Closure type for logic to be used to handle
 /// the receiving end of a raw channel.
@@ -643,348 +769,90 @@ where
     upgrade_raw_channel(raw_sender, raw_receiver, raw_recv_close)
 }
 
+type PrivFactorySender = Arc<
+    dyn Fn(
+            RawSender,
+            RawReceiver,
+            RawClose,
+        ) -> BoxFuture<'static, InvResult<()>>
+        + 'static
+        + Send
+        + Sync,
+>;
+
+/// Receive an incoming bind request to a registered api implementation.
+pub struct FactoryReceiver(ImplSpec, InvShare<PrivBrokerInner>);
+
+impl FactoryReceiver {
+    /// Specify the logic that will be applied on receipt of incoming bindings.
+    pub fn handle<Fut, F>(self, f: F)
+    where
+        Fut: Future<Output = InvResult<()>> + 'static + Send,
+        F: Fn(RawSender, RawReceiver, RawClose) -> Fut + 'static + Send + Sync,
+    {
+        let Self(impl_spec, inner) = self;
+        let s: PrivFactorySender = Arc::new(move |s, r, c| f(s, r, c).boxed());
+        let n = inner
+            .share_mut(move |i, _| match i.map.entry(impl_spec) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    match e.insert(PrivPendingFactorySender::Ready(s)) {
+                        PrivPendingFactorySender::Pending(n) => Ok(n),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            })
+            .expect("should be impossible to set factory sender");
+        n.notify_waiters();
+    }
+}
+
 /// inversion broker trait
 pub trait AsInvBroker: 'static + Send + Sync {
-    /*
     /// Register a new api impl to this broker
-    fn register_impl(
+    fn register_impl_raw(
         &self,
-        api_impl: S,
-        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
-    ) -> BoxFuture<'static, InvResult<()>>;
-    */
+        impl_spec: ImplSpec,
+    ) -> BoxFuture<'static, InvResult<FactoryReceiver>>;
 
     /// Bind to a registered api implementation
+    /// TODO - for now we only support this binding to an exact impl,
+    ///        someday we can add ApiSpec / feature matching.
     fn bind_to_impl_raw(
         &self,
         impl_spec: ImplSpec,
     ) -> BoxFuture<'static, InvResult<(RawSender, RawReceiver, RawClose)>>;
 }
 
-// --- old version --- //
-
-/*
-/// Function signature for creating a new BoundApi instance.
-pub type DynBoundApi<Evt> = Arc<
-    dyn Fn(Evt) -> BoxFuture<'static, InvResult<()>> + 'static + Send + Sync,
->;
-
-/// Handle for publishing an event to some other logical actor.
-pub struct BoundApi<Evt: 'static + Send>(InvShare<DynBoundApi<Evt>>);
-
-impl<Evt: 'static + Send> Clone for BoundApi<Evt> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<Evt: 'static + Send> BoundApi<Evt> {
-    /// Construct a new bound api handle via trait callback
-    pub fn new<Fut, F>(f: F) -> Self
-    where
-        Fut: Future<Output = InvResult<()>> + 'static + Send,
-        F: Fn(Evt) -> Fut + 'static + Send + Sync,
-    {
-        let f: DynBoundApi<Evt> = Arc::new(move |evt| f(evt).boxed());
-        Self::from_dyn(f)
-    }
-
-    /// Construct a new bound api handle via boxed callback
-    pub fn from_dyn(f: DynBoundApi<Evt>) -> Self {
-        Self(InvShare::new_rw_lock(f))
-    }
-
-    /// Has this channel been closed (underlying callback dropped)?
-    pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
-    }
-
-    /// Explicitly drop the underlying callback handle.
-    pub fn close(&self) {
-        self.0.close()
-    }
-
-    /// Emit an event to the remote logical actor.
-    /// If that actor returns a `ConnectionAborted` error, the
-    /// underlying callback handle will be dropped.
-    pub fn emit(
-        &self,
-        evt: Evt,
-    ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        let inner = self.0.clone();
-        async move {
-            let f = inner.share_ref(|i| Ok(i.clone()))?;
-            match f(evt).await {
-                Ok(r) => Ok(r),
-                Err(e) => {
-                    if matches!(e.kind(), std::io::ErrorKind::ConnectionAborted)
-                    {
-                        inner.close();
-                    }
-                    Err(e)
-                }
-            }
-        }
-    }
-}
-
-/// Function signature for creating a new BoundApiFactory instance.
-pub type DynBoundApiFactory<EvtIn, EvtOut> = Arc<
-    dyn Fn(BoundApi<EvtOut>) -> BoxFuture<'static, InvResult<BoundApi<EvtIn>>>
-        + 'static
-        + Send
-        + Sync,
->;
-
-/// A broker api factory is like a virtual channel.
-/// Events can be emitted or received.
-pub struct BoundApiFactory<EvtIn, EvtOut>(
-    InvShare<DynBoundApiFactory<EvtIn, EvtOut>>,
-)
-where
-    EvtIn: 'static + Send,
-    EvtOut: 'static + Send;
-
-impl<EvtIn, EvtOut> Clone for BoundApiFactory<EvtIn, EvtOut>
-where
-    EvtIn: 'static + Send,
-    EvtOut: 'static + Send,
-{
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<EvtIn, EvtOut> BoundApiFactory<EvtIn, EvtOut>
-where
-    EvtIn: 'static + Send,
-    EvtOut: 'static + Send,
-{
-    /// Construct a new bound api handle via trait callback
-    pub fn new<Fut, F>(f: F) -> Self
-    where
-        Fut: Future<Output = InvResult<BoundApi<EvtIn>>> + 'static + Send,
-        F: Fn(BoundApi<EvtOut>) -> Fut + 'static + Send + Sync,
-    {
-        let f: DynBoundApiFactory<EvtIn, EvtOut> =
-            Arc::new(move |evt_out| f(evt_out).boxed());
-        Self::from_dyn(f)
-    }
-
-    /// Construct a new bound api handle via boxed callback
-    pub fn from_dyn(f: DynBoundApiFactory<EvtIn, EvtOut>) -> Self {
-        Self(InvShare::new_rw_lock(f))
-    }
-
-    /// Has this channel been closed (underlying callback dropped)?
-    pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
-    }
-
-    /// Explicitly drop the underlying callback handle.
-    pub fn close(&self) {
-        // TODO - we must also close both sides
-        // of all ALL CHILDREN BoundApi instances.
-        self.0.close()
-    }
-
-    /// Bind an api with this BoundApiFactory instance.
-    pub fn bind(
-        &self,
-        evt_out: BoundApi<EvtOut>,
-    ) -> impl Future<Output = InvResult<BoundApi<EvtIn>>> + 'static + Send {
-        let inner = self.0.clone();
-        async move {
-            let f = inner.share_ref(|i| Ok(i.clone()))?;
-            match f(evt_out).await {
-                Ok(r) => Ok(r),
-                Err(e) => {
-                    if matches!(e.kind(), std::io::ErrorKind::ConnectionAborted)
-                    {
-                        // TODO - we must also close both sides
-                        // of all ALL CHILDREN BoundApi instances.
-                        inner.close();
-                    }
-                    Err(e)
-                }
-            }
-        }
-    }
-}
-
-/// inversion broker message
-#[non_exhaustive]
-pub struct InvBrokerMsg {
-    /// Message Id
-    pub id: InvUniq,
-
-    /// Message Content
-    pub msg: InvAny,
-    // TODO - add capability checking data
-}
-
-impl InvBrokerMsg {
-    /// construct a new "evt" type message
-    pub fn new_evt(msg: InvAny) -> Self {
-        Self {
-            id: InvUniq::new_evt(),
-            msg,
-        }
-    }
-
-    /// construct a new "req" type message
-    pub fn new_req(msg: InvAny) -> Self {
-        Self {
-            id: InvUniq::new_req(),
-            msg,
-        }
-    }
-
-    /// construct a new "res" type message
-    pub fn new_res(msg: InvAny) -> Self {
-        Self {
-            id: InvUniq::new_res(),
-            msg,
-        }
-    }
-
-    /// `true` if this message is "evt" type.
-    pub fn is_evt(&self) -> bool {
-        self.id.is_evt()
-    }
-
-    /// `true` if this message is "req" type.
-    pub fn is_req(&self) -> bool {
-        self.id.is_req()
-    }
-
-    /// `true` if this message is "res" type.
-    pub fn is_res(&self) -> bool {
-        self.id.is_res()
-    }
-
-    /// extract the message content from this struct.
-    pub fn into_msg(self) -> InvAny {
-        self.msg
-    }
-}
-
-/// Typed wrapper around a generic InvBroker api.
-pub struct BoundApiHandle<T: 'static + Send>(
-    pub BoundApi<InvBrokerMsg>,
-    std::marker::PhantomData<&'static T>,
-);
-
-impl<T: 'static + Send> Clone for BoundApiHandle<T> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone(), std::marker::PhantomData)
-    }
-}
-
-impl<T: 'static + Send> BoundApiHandle<T> {
-    /// Construct a new BoundApiHandle
-    pub fn new(inner: BoundApi<InvBrokerMsg>) -> Self {
-        Self(inner, std::marker::PhantomData)
-    }
-
-    /// Has this channel been closed?
-    pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
-    }
-
-    /// Explicitly close this channel.
-    pub fn close(&self) {
-        self.0.close()
-    }
-
-    /// Emit an event to the remote logical actor.
-    pub fn emit(
-        &self,
-        evt: T,
-    ) -> impl Future<Output = InvResult<()>> + 'static + Send
-    where
-        T: serde::Serialize,
-    {
-        self.0.emit(InvBrokerMsg::new_evt(InvAny::new(evt)))
-    }
-}
-
-/// inversion broker trait
-pub trait AsInvBroker: 'static + Send + Sync {
-    /// Register a new api to this broker
-    fn register_api(&self, api: Spec) -> BoxFuture<'static, InvResult<()>>;
-
-    /// Register a new api impl to this broker
-    fn register_impl(
-        &self,
-        api: Spec,
-        api_impl: Spec,
-        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
-    ) -> BoxFuture<'static, InvResult<()>>;
-
-    /// Bind to a registered api implementation
-    fn bind_to_impl(
-        &self,
-        api: Spec,
-        api_impl: Spec,
-        evt_out: BoundApi<InvBrokerMsg>,
-    ) -> BoxFuture<'static, InvResult<BoundApi<InvBrokerMsg>>>;
-}
-
 /// inversion broker type handle
 pub struct InvBroker(pub Arc<dyn AsInvBroker>);
 
-impl AsInvBroker for InvBroker {
-    fn register_api(&self, api: Spec) -> BoxFuture<'static, InvResult<()>> {
-        AsInvBroker::register_api(&*self.0, api)
-    }
+impl std::ops::Deref for InvBroker {
+    type Target = dyn AsInvBroker;
 
-    fn register_impl(
-        &self,
-        api: Spec,
-        api_impl: Spec,
-        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
-    ) -> BoxFuture<'static, InvResult<()>> {
-        AsInvBroker::register_impl(&*self.0, api, api_impl, factory)
-    }
-
-    fn bind_to_impl(
-        &self,
-        api: Spec,
-        api_impl: Spec,
-        evt_out: BoundApi<InvBrokerMsg>,
-    ) -> BoxFuture<'static, InvResult<BoundApi<InvBrokerMsg>>> {
-        AsInvBroker::bind_to_impl(&*self.0, api, api_impl, evt_out)
+    fn deref(&self) -> &Self::Target {
+        &*self.0
     }
 }
 
 impl InvBroker {
-    /// Register a new api to this broker
-    pub fn register_api(
-        &self,
-        api: Spec,
-    ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        AsInvBroker::register_api(self, api)
-    }
-
     /// Register a new api impl to this broker
-    pub fn register_impl(
+    pub fn register_impl_raw(
         &self,
-        api: Spec,
-        api_impl: Spec,
-        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
-    ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        AsInvBroker::register_impl(self, api, api_impl, factory)
+        impl_spec: ImplSpec,
+    ) -> impl Future<Output = InvResult<FactoryReceiver>> {
+        self.0.register_impl_raw(impl_spec)
     }
 
     /// Bind to a registered api implementation
-    pub fn bind_to_impl(
+    /// TODO - for now we only support this binding to an exact impl,
+    ///        someday we can add ApiSpec / feature matching.
+    pub fn bind_to_impl_raw(
         &self,
-        api: Spec,
-        api_impl: Spec,
-        evt_out: BoundApi<InvBrokerMsg>,
-    ) -> impl Future<Output = InvResult<BoundApi<InvBrokerMsg>>> {
-        AsInvBroker::bind_to_impl(self, api, api_impl, evt_out)
+        impl_spec: ImplSpec,
+    ) -> impl Future<Output = InvResult<(RawSender, RawReceiver, RawClose)>>
+    {
+        self.0.bind_to_impl_raw(impl_spec)
     }
 }
 
@@ -995,158 +863,90 @@ pub fn new_broker() -> InvBroker {
 
 // -- private -- //
 
-
-struct ImplRegistry {
-    map: HashMap<Spec, BoundApiFactory<InvBrokerMsg, InvBrokerMsg>>,
-}
-
-impl ImplRegistry {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn check_add_impl(
-        &mut self,
-        api_impl: Spec,
-        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
-    ) -> InvResult<()> {
-        match self.map.entry(api_impl) {
-            std::collections::hash_map::Entry::Occupied(_) => {
-                Err(InvError::other("error, attepted to duplicate api_impl"))
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(factory);
-                Ok(())
-            }
-        }
-    }
-
-    pub fn check_bind_to_impl(
-        &self,
-        api_impl: Spec,
-    ) -> InvResult<BoundApiFactory<InvBrokerMsg, InvBrokerMsg>> {
-        match self.map.get(&api_impl) {
-            Some(factory) => Ok(factory.clone()),
-            None => Err(std::io::ErrorKind::InvalidInput.into()),
-        }
-    }
-}
-
-struct ApiRegistry {
-    map: HashMap<Spec, ImplRegistry>,
-}
-
-impl ApiRegistry {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn check_add_api(&mut self, api: Spec) -> InvResult<()> {
-        match self.map.entry(api) {
-            std::collections::hash_map::Entry::Occupied(_) => {
-                Err(InvError::other("error, attepted to duplicate api_spec"))
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(ImplRegistry::new());
-                Ok(())
-            }
-        }
-    }
-
-    pub fn check_add_impl(
-        &mut self,
-        api: Spec,
-        api_impl: Spec,
-        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
-    ) -> InvResult<()> {
-        match self.map.get_mut(&api) {
-            Some(map) => {
-                map.check_add_impl(api_impl, factory)?;
-                Ok(())
-            }
-            None => Err(InvError::other(format!(
-                "invalid api_spec, register it first {:?} not in {:?}",
-                api,
-                self.map.keys().collect::<Vec<_>>(),
-            ))),
-        }
-    }
-
-    pub fn check_bind_to_impl(
-        &self,
-        api: Spec,
-        api_impl: Spec,
-    ) -> InvResult<BoundApiFactory<InvBrokerMsg, InvBrokerMsg>> {
-        match self.map.get(&api) {
-            Some(map) => map.check_bind_to_impl(api_impl),
-            None => Err(std::io::ErrorKind::InvalidInput.into()),
-        }
-    }
+#[derive(Clone)]
+enum PrivPendingFactorySender {
+    Pending(Arc<tokio::sync::Notify>),
+    Ready(PrivFactorySender),
 }
 
 struct PrivBrokerInner {
-    api_registry: ApiRegistry,
+    map: HashMap<ImplSpec, PrivPendingFactorySender>,
 }
 
-impl PrivBrokerInner {
-    pub fn new() -> Self {
-        Self {
-            api_registry: ApiRegistry::new(),
-        }
-    }
-}
-
-struct PrivBroker(Arc<crate::inv_share::InvShare<PrivBrokerInner>>);
+struct PrivBroker(InvShare<PrivBrokerInner>);
 
 impl PrivBroker {
-    fn new() -> Self {
-        Self(Arc::new(crate::inv_share::InvShare::new_rw_lock(
-            PrivBrokerInner::new(),
-        )))
+    pub fn new() -> Self {
+        Self(InvShare::new_rw_lock(PrivBrokerInner {
+            map: HashMap::new(),
+        }))
     }
 }
 
 impl AsInvBroker for PrivBroker {
-    fn register_api(&self, api: Spec) -> BoxFuture<'static, InvResult<()>> {
-        let r = self
-            .0
-            .share_mut(move |i, _| i.api_registry.check_add_api(api));
-        async move { r }.boxed()
-    }
-
-    fn register_impl(
+    fn register_impl_raw(
         &self,
-        api: Spec,
-        api_impl: Spec,
-        factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg>,
-    ) -> BoxFuture<'static, InvResult<()>> {
-        let r = self.0.share_mut(move |i, _| {
-            i.api_registry.check_add_impl(api, api_impl, factory)
-        });
-        async move { r }.boxed()
-    }
-
-    fn bind_to_impl(
-        &self,
-        api: Spec,
-        api_impl: Spec,
-        evt_out: BoundApi<InvBrokerMsg>,
-    ) -> BoxFuture<'static, InvResult<BoundApi<InvBrokerMsg>>> {
-        let factory = self.0.share_mut(move |i, _| {
-            i.api_registry.check_bind_to_impl(api, api_impl)
-        });
+        impl_spec: ImplSpec,
+    ) -> BoxFuture<'static, InvResult<FactoryReceiver>> {
+        let inner = self.0.clone();
         async move {
-            let factory = factory?;
-            factory.bind(evt_out).await
+            let notify = Arc::new(tokio::sync::Notify::new());
+
+            let impl_spec2 = impl_spec.clone();
+            inner.share_mut(move |i, _| {
+                if i.map.contains_key(&impl_spec2) {
+                    return Err("impl already registered".into());
+                }
+                i.map.insert(
+                    impl_spec2,
+                    PrivPendingFactorySender::Pending(notify),
+                );
+                Ok(())
+            })?;
+
+            let recv = FactoryReceiver(impl_spec, inner);
+
+            Ok(recv)
+        }
+        .boxed()
+    }
+
+    fn bind_to_impl_raw(
+        &self,
+        impl_spec: ImplSpec,
+    ) -> BoxFuture<'static, InvResult<(RawSender, RawReceiver, RawClose)>> {
+        let inner = self.0.clone();
+        async move {
+            let sender = match inner
+                .share_ref(|i| Ok(i.map.get(&impl_spec).cloned()))?
+            {
+                None => return Err("no such impl".into()),
+                Some(sender) => sender,
+            };
+
+            let sender = match sender {
+                PrivPendingFactorySender::Pending(notify) => {
+                    notify.notified().await;
+                    match inner
+                        .share_ref(|i| Ok(i.map.get(&impl_spec).cloned()))?
+                    {
+                        Some(PrivPendingFactorySender::Ready(sender)) => sender,
+                        _ => return Err("no such impl".into()),
+                    }
+                }
+                PrivPendingFactorySender::Ready(sender) => sender,
+            };
+
+            let (raw_send1, raw_recv2, raw_close2) = raw_channel();
+            let (raw_send2, raw_recv1, raw_close1) = raw_channel();
+
+            sender(raw_send1, raw_recv1, raw_close1).await?;
+
+            Ok((raw_send2, raw_recv2, raw_close2))
         }
         .boxed()
     }
 }
-*/
 
 #[cfg(test)]
 mod tests {
@@ -1156,29 +956,29 @@ mod tests {
 
     #[test]
     fn test_specs() {
-        let spec = ImplSpec {
-            api_spec: ApiSpec {
+        let spec = Arc::new(ImplSpecInner {
+            api_spec: Arc::new(ApiSpecInner {
                 api_features: Box::new([
                     FeatureDef {
-                        feature_name: "readRaw".to_string().into_boxed_str(),
+                        feature_name: "readRaw".into(),
                         feature_status: FeatureSpecStatus::Deprecated,
                     },
                     FeatureDef {
-                        feature_name: "readBytes".to_string().into_boxed_str(),
+                        feature_name: "readBytes".into(),
                         feature_status: FeatureSpecStatus::Stable,
                     },
                     FeatureDef {
-                        feature_name: "writeBytes".to_string().into_boxed_str(),
+                        feature_name: "writeBytes".into(),
                         feature_status: FeatureSpecStatus::Unstable,
                     },
                 ]),
                 ..Default::default()
-            },
-            impl_features: Box::new(["readBytes".to_string().into_boxed_str()]),
+            }),
+            impl_features: Box::new(["readBytes".into()]),
             ..Default::default()
-        };
+        });
         println!("{}: {:#?}", spec, spec);
-        println!("{}", serde_yaml::to_string(&spec).unwrap());
+        println!("{}", serde_json::to_string(&spec).unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1262,53 +1062,53 @@ mod tests {
         assert_eq!(43, res);
     }
 
-    /*
     #[tokio::test(flavor = "multi_thread")]
     async fn test_inv_broker() {
-        let api = Spec::new(InvId::new_anon());
-
-        let api_impl = Spec::new(InvId::new_anon());
+        let impl_spec = Arc::new(ImplSpecInner::default());
 
         let broker = new_broker();
 
-        broker.register_api(api.clone()).await.unwrap();
-
-        let factory: BoundApiFactory<InvBrokerMsg, InvBrokerMsg> =
-            BoundApiFactory::new(|evt_out| {
-                let evt_in: BoundApi<InvBrokerMsg> =
-                    BoundApi::new(move |evt_in: InvBrokerMsg| {
-                        let evt_out = evt_out.clone();
-                        async move {
-                            let input: usize = evt_in.into_msg().downcast()?;
-                            let msg =
-                                InvBrokerMsg::new_evt(InvAny::new(input + 1));
-                            evt_out.emit(msg).await?;
-                            Ok(())
+        let f = broker.register_impl_raw(impl_spec.clone()).await.unwrap();
+        f.handle(|s, r, c| async move {
+            let (s, r) = unitype_upgrade_raw_channel::<isize>(s, r, c);
+            let s2 = s.clone();
+            tokio::task::spawn(async move {
+                s2.emit(11).await.unwrap();
+                println!("from task res: {:?}", s2.request(11).await.unwrap());
+            });
+            r.handle(move |inc| {
+                let s = s.clone();
+                async move {
+                    match inc {
+                        TypedIncoming::Event(evt) => {
+                            println!("impl evt: {:?}", evt);
+                            println!("impl req: {:?}", s.request(42).await?);
                         }
-                        .boxed()
-                    });
-                async move { Ok(evt_in) }.boxed()
+                        TypedIncoming::Request(req, resp) => {
+                            s.emit(req).await?;
+                            resp.respond(req + 1).await;
+                        }
+                    }
+                    Ok(())
+                }
             });
+            Ok(())
+        });
 
-        broker
-            .register_impl(api.clone(), api_impl.clone(), factory)
-            .await
-            .unwrap();
-
-        let res = Arc::new(atomic::AtomicUsize::new(0));
-        let res2 = res.clone();
-        let print_res: BoundApi<InvBrokerMsg> =
-            BoundApi::new(move |evt: InvBrokerMsg| {
-                let output: usize = evt.into_msg().downcast().unwrap();
-                println!("got: {}", output);
-                res2.store(output, atomic::Ordering::SeqCst);
-                async move { Ok(()) }.boxed()
-            });
-
-        let evt = broker.bind_to_impl(api, api_impl, print_res).await.unwrap();
-        let msg = InvBrokerMsg::new_evt(InvAny::new(42));
-        evt.emit(msg).await.unwrap();
-        assert_eq!(43, res.load(atomic::Ordering::SeqCst));
+        let (s, r, c) = broker.bind_to_impl_raw(impl_spec).await.unwrap();
+        let (s, r) = unitype_upgrade_raw_channel::<isize>(s, r, c);
+        r.handle(|inc| async move {
+            match inc {
+                TypedIncoming::Event(evt) => {
+                    println!("bind evt: {:?}", evt);
+                }
+                TypedIncoming::Request(req, resp) => {
+                    resp.respond(req + 1).await;
+                }
+            }
+            Ok(())
+        });
+        s.emit(42).await.unwrap();
+        println!("bind res: {:?}", s.request(42).await.unwrap());
     }
-    */
 }
