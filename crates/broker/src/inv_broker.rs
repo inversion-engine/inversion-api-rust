@@ -1,252 +1,272 @@
 //! inversion broker traits and impl
 
 use crate::inv_any::InvAny;
+use crate::inv_api_spec::*;
 use crate::inv_error::*;
 use crate::inv_share::InvShare;
 use crate::inv_uniq::InvUniq;
 use futures::future::{BoxFuture, FutureExt};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-/// Status of a particular Feature Definition in an ApiSpec.
-#[derive(
-    Debug,
-    serde::Serialize,
-    serde::Deserialize,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-)]
-#[serde(rename_all = "camelCase")]
-pub enum FeatureSpecStatus {
-    /// This is a proposed, unstable feature.
-    /// It may or may not function, and the api
-    /// may change between revisions.
-    Unstable,
+/// Inversion Api Sender trait.
+pub trait AsInvSender: 'static + Send + Sync {
+    /// The data type to be sent through this sender.
+    type Data: 'static + Send;
 
-    /// This is a stable feature.
-    /// Implementations claiming this API SPEC REVISION
-    /// *MUST* implement this feature as defined.
-    Stable,
+    /// Send data to the remote end of this "channel".
+    fn send(&self, data: Self::Data) -> BoxFuture<'static, InvResult<()>>;
 
-    /// This previously stable feature is no longer required.
-    /// Implementations claiming this API SPEC REVISION
-    /// *MAY* report this feature as not implemented.
-    Deprecated,
+    /// Has this channel been closed?
+    fn is_closed(&self) -> bool;
+
+    /// Close this channel from the sender side.
+    fn close(&self);
 }
 
-/// Feature Definition for ApiSpec.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FeatureDef {
-    /// The short reference name for this feature.
-    pub feature_name: Box<str>,
+/// Concrete wrapper for a Dyn Inversion Api Sender.
+#[derive(Clone)]
+pub struct InvSender<Data: 'static + Send>(
+    pub Arc<dyn AsInvSender<Data = Data>>,
+);
 
-    /// The implementation status of this feature.
-    pub feature_status: FeatureSpecStatus,
+impl<Data: 'static + Send> InvSender<Data> {
+    /// Send data to the remote end of this "channel".
+    pub fn send(
+        &self,
+        data: Data,
+    ) -> impl Future<Output = InvResult<()>> + 'static + Send {
+        AsInvSender::send(&*self.0, data)
+    }
+
+    /// Has this channel been closed?
+    pub fn is_closed(&self) -> bool {
+        AsInvSender::is_closed(&*self.0)
+    }
+
+    /// Close this channel from the sender side.
+    pub fn close(&self) {
+        AsInvSender::close(&*self.0)
+    }
 }
 
-impl serde::Serialize for FeatureDef {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+/// Typedef for a Dyn Inversion Api Handler Callback.
+pub type InvHandlerCbDyn<Data> = Arc<
+    dyn Fn(Data) -> BoxFuture<'static, InvResult<()>> + 'static + Send + Sync,
+>;
+
+/// Inversion Api Handler trait.
+pub trait AsInvHandler: 'static + Send {
+    /// The data type to be received by this handler.
+    type Data: 'static + Send;
+
+    /// Supply the logic that will be invoken on message receipt.
+    fn handle(self: Box<Self>, cb: InvHandlerCbDyn<Self::Data>);
+}
+
+/// Concrete wrapper for a Dyn Inversion Api Handler.
+pub struct InvHandler<Data: 'static + Send>(
+    pub Box<dyn AsInvHandler<Data = Data>>,
+);
+
+impl<Data: 'static + Send> InvHandler<Data> {
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure should be Sync, and return a 'static Future.
+    pub fn handle<Fut, Cb>(self, cb: Cb)
     where
-        S: serde::Serializer,
+        Fut: 'static + Send + Future<Output = InvResult<()>>,
+        Cb: 'static + Send + Sync + Fn(Data) -> Fut,
     {
-        let s = (&self.feature_name, &self.feature_status);
-        s.serialize(serializer)
+        let cb = Arc::new(move |data| cb(data).boxed());
+        AsInvHandler::handle(self.0, cb);
     }
-}
 
-impl<'de> serde::Deserialize<'de> for FeatureDef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure should be Sync, and return a direct result.
+    pub fn handle_sync<Cb>(self, cb: Cb)
     where
-        D: serde::Deserializer<'de>,
+        Cb: 'static + Send + Sync + Fn(Data) -> InvResult<()>,
     {
-        let d: (Box<str>, FeatureSpecStatus) =
-            serde::Deserialize::deserialize(deserializer)?;
-        Ok(Self {
-            feature_name: d.0,
-            feature_status: d.1,
-        })
+        let cb = Arc::new(move |data| {
+            let res = cb(data);
+            async move { res }.boxed()
+        });
+        AsInvHandler::handle(self.0, cb);
+    }
+
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure can be FnMut, and return a 'static Future.
+    pub fn handle_mut<Fut, Cb>(self, cb: Cb)
+    where
+        Fut: 'static + Send + Future<Output = InvResult<()>>,
+        Cb: 'static + Send + FnMut(Data) -> Fut,
+    {
+        let m = Arc::new(Mutex::new(cb));
+        let cb = Arc::new(move |data| (m.lock())(data).boxed());
+        AsInvHandler::handle(self.0, cb)
+    }
+
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure can be FnMut, and return a direct result.
+    pub fn handle_mut_sync<Cb>(self, cb: Cb)
+    where
+        Cb: 'static + Send + FnMut(Data) -> InvResult<()>,
+    {
+        let m = Arc::new(Mutex::new(cb));
+        let cb = Arc::new(move |data| {
+            let res = (m.lock())(data);
+            async move { res }.boxed()
+        });
+        AsInvHandler::handle(self.0, cb);
     }
 }
 
-impl std::fmt::Display for FeatureDef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string(&self).unwrap())
+/// Inversion Api Close trait.
+pub trait AsInvClose: 'static + Send + Sync {
+    /// Has this channel been closed?
+    fn is_closed(&self) -> bool;
+
+    /// Close this channel from the sender side.
+    fn close(&self);
+}
+
+/// Concrete wrapper for a Dyn Inversion Api Handler.
+#[derive(Clone)]
+pub struct InvClose(pub Arc<dyn AsInvClose>);
+
+impl InvClose {
+    /// Has this channel been closed?
+    pub fn is_closed(&self) -> bool {
+        AsInvClose::is_closed(&*self.0)
+    }
+
+    /// Close this channel from the sender side.
+    pub fn close(&self) {
+        AsInvClose::close(&*self.0)
     }
 }
 
-impl std::fmt::Debug for FeatureDef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string_pretty(&self).unwrap())
+/// Typedef for Inversion Api Raw Channel Sender.
+pub type InvRawSender2 = InvSender<(InvUniq, InvAny)>;
+
+/// Typedef for Inversion Api Raw Channel Handler.
+pub type InvRawHandler2 = InvHandler<(InvUniq, InvAny)>;
+
+/// Typedef for Inversion Api Raw Channel Close.
+pub type InvRawClose2 = InvClose;
+
+/// Create a raw, low-level channel.
+pub fn raw_channel2() -> (InvRawSender2, InvRawHandler2, InvRawClose2) {
+    let notify_kill = Arc::new(tokio::sync::Notify::new());
+    let (s, r) = tokio::sync::oneshot::channel();
+
+    let notify_kill2 = notify_kill.clone();
+    let recv_fn = async move {
+        let r = tokio::time::timeout(std::time::Duration::from_secs(30), r);
+        futures::select_biased! {
+            res = r.fuse() => {
+                res
+                    .map_err(|_| InvError::from(std::io::ErrorKind::TimedOut))?
+                    .map_err(|_| InvError::from(std::io::ErrorKind::ConnectionReset))
+            }
+            _ = notify_kill2.notified().fuse() => {
+                Err(std::io::ErrorKind::ConnectionReset.into())
+            }
+        }
+    }.boxed().shared();
+
+    struct I {
+        notify_kill: Arc<tokio::sync::Notify>,
+        #[allow(clippy::type_complexity)]
+        recv_fn: futures::future::Shared<
+            BoxFuture<'static, InvResult<InvHandlerCbDyn<(InvUniq, InvAny)>>>,
+        >,
     }
-}
 
-/// Spec representing an Inversion API.
-#[non_exhaustive]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ApiSpecInner {
-    /// top level categorization.
-    pub api_cat1: Box<str>,
-
-    /// sub level categorization.
-    pub api_cat2: Box<str>,
-
-    /// api name.
-    pub api_name: Box<str>,
-
-    /// api revision.
-    pub api_revision: u32,
-
-    /// feature list associated with this spec.
-    pub api_features: Box<[FeatureDef]>,
-}
-
-impl Default for ApiSpecInner {
-    fn default() -> Self {
-        Self {
-            api_cat1: "anon".into(),
-            api_cat2: "anon".into(),
-            api_name: format!("{}", InvUniq::new_rand()).into(),
-            api_revision: 0,
-            api_features: Box::new([]),
+    impl Drop for I {
+        fn drop(&mut self) {
+            self.notify_kill.notify_waiters();
         }
     }
-}
 
-impl serde::Serialize for ApiSpecInner {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let s = (
-            "invApiSpec",
-            &self.api_cat1,
-            &self.api_cat2,
-            &self.api_name,
-            &self.api_revision,
-            &self.api_features,
-        );
-        s.serialize(serializer)
-    }
-}
+    let inner = InvShare::new_rw_lock(I {
+        notify_kill,
+        recv_fn,
+    });
 
-impl<'de> serde::Deserialize<'de> for ApiSpecInner {
-    #[allow(clippy::type_complexity)]
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let d: (
-            Box<str>,
-            Box<str>,
-            Box<str>,
-            Box<str>,
-            u32,
-            Box<[FeatureDef]>,
-        ) = serde::Deserialize::deserialize(deserializer)?;
-        Ok(Self {
-            api_cat1: d.1,
-            api_cat2: d.2,
-            api_name: d.3,
-            api_revision: d.4,
-            api_features: d.5,
-        })
-    }
-}
+    struct S(InvShare<I>);
 
-impl std::fmt::Display for ApiSpecInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string(&self).unwrap())
-    }
-}
+    impl AsInvSender for S {
+        type Data = (InvUniq, InvAny);
 
-impl std::fmt::Debug for ApiSpecInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string_pretty(&self).unwrap())
-    }
-}
+        fn send(&self, data: Self::Data) -> BoxFuture<'static, InvResult<()>> {
+            let inner = self.0.clone();
+            let fut = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                async move {
+                    let (notify_kill, recv_fn) = inner.share_ref(|i| {
+                        Ok((i.notify_kill.clone(), i.recv_fn.clone()))
+                    })?;
 
-/// Inversion Api ApiSpec type.
-pub type ApiSpec = Arc<ApiSpecInner>;
+                    let sender = recv_fn.await?;
 
-/// Spec representing an Inversion API implementation.
-#[non_exhaustive]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ImplSpecInner {
-    /// Api spec this impl is implementing.
-    pub api_spec: ApiSpec,
+                    futures::select_biased! {
+                        res = sender(data).fuse() => {
+                            res
+                        }
+                        _ = notify_kill.notified().fuse() => {
+                            Err(std::io::ErrorKind::ConnectionReset.into())
+                        }
+                    }
+                },
+            );
+            async move {
+                fut.await
+                    .map_err(|_| InvError::from(std::io::ErrorKind::TimedOut))?
+            }
+            .boxed()
+        }
 
-    /// The name of this implementation.
-    pub impl_name: Box<str>,
+        fn is_closed(&self) -> bool {
+            self.0.is_closed()
+        }
 
-    /// The revision of this implementation.
-    pub impl_revision: u32,
-
-    /// feature impl list associated with this spec.
-    pub impl_features: Box<[Box<str>]>,
-}
-
-impl Default for ImplSpecInner {
-    fn default() -> Self {
-        Self {
-            api_spec: ApiSpec::default(),
-            impl_name: format!("{}", InvUniq::new_rand()).into(),
-            impl_revision: 0,
-            impl_features: Box::new([]),
+        fn close(&self) {
+            self.0.close();
         }
     }
-}
 
-impl serde::Serialize for ImplSpecInner {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let s = (
-            "invImplSpec",
-            &self.api_spec,
-            &self.impl_name,
-            &self.impl_revision,
-            &self.impl_features,
-        );
-        s.serialize(serializer)
+    impl AsInvClose for S {
+        fn is_closed(&self) -> bool {
+            AsInvSender::is_closed(self)
+        }
+
+        fn close(&self) {
+            AsInvSender::close(self)
+        }
     }
-}
 
-impl<'de> serde::Deserialize<'de> for ImplSpecInner {
-    #[allow(clippy::type_complexity)]
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let d: (Box<str>, ApiSpec, Box<str>, u32, Box<[Box<str>]>) =
-            serde::Deserialize::deserialize(deserializer)?;
-        Ok(Self {
-            api_spec: d.1,
-            impl_name: d.2,
-            impl_revision: d.3,
-            impl_features: d.4,
-        })
+    struct H(tokio::sync::oneshot::Sender<InvHandlerCbDyn<(InvUniq, InvAny)>>);
+
+    impl AsInvHandler for H {
+        type Data = (InvUniq, InvAny);
+
+        fn handle(self: Box<Self>, cb: InvHandlerCbDyn<Self::Data>) {
+            let _ = self.0.send(cb);
+        }
     }
-}
 
-impl std::fmt::Display for ImplSpecInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string(&self).unwrap())
-    }
-}
+    let sender = Arc::new(S(inner));
+    let handler = Box::new(H(s));
 
-impl std::fmt::Debug for ImplSpecInner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string_pretty(&self).unwrap())
-    }
+    (
+        InvSender(sender.clone()),
+        InvHandler(handler),
+        InvClose(sender),
+    )
 }
-
-/// Inversion Api ImplSpec type.
-pub type ImplSpec = Arc<ImplSpecInner>;
 
 /// Closure type for logic to be used to handle
 /// the receiving end of a raw channel.
@@ -977,6 +997,40 @@ mod tests {
         });
         println!("{}: {:#?}", spec, spec);
         println!("{}", serde_json::to_string(&spec).unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_raw_channel2() {
+        // create the unidirectional channel
+        let (send, recv, close) = raw_channel2();
+
+        // add the handle logic
+        recv.handle(move |(id, data)| {
+            let close = close.clone();
+            async move {
+                let data = data.downcast::<isize>().unwrap();
+                println!("{:?} {:?}", id, data);
+                assert_eq!("evt", &format!("{}", id));
+                assert_eq!(42, data);
+                // close the channel after a single event
+                close.close();
+                Ok(())
+            }
+        });
+
+        // send the event
+        send.send((InvUniq::new_evt(), InvAny::new(42_isize)))
+            .await
+            .unwrap();
+
+        // should be closed
+        assert!(send.is_closed());
+
+        // now closed, we should error out
+        assert!(send
+            .send((InvUniq::new_evt(), InvAny::new(42_isize)))
+            .await
+            .is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]
