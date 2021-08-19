@@ -11,89 +11,165 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-/// Inversion Api Sender trait.
-pub trait AsInvSender: 'static + Send + Sync {
-    /// The data type to be sent through this sender.
-    type Data: 'static + Send;
+/// Helper traits. You should only need these if you're implementing
+/// low-level inversion engine coding.
+pub mod traits {
+    use super::*;
 
-    /// Send data to the remote end of this "channel".
-    fn send(&self, data: Self::Data) -> BoxFuture<'static, InvResult<()>>;
+    /// Inversion Api Sender trait.
+    pub trait AsInvRawSender: 'static + Send + Sync {
+        /// Send data to the remote end of this "channel".
+        fn send(
+            &self,
+            msg_id: InvUniq,
+            data: InvAny,
+        ) -> BoxFuture<'static, InvResult<()>>;
 
-    /// Has this channel been closed?
-    fn is_closed(&self) -> bool;
+        /// Has this channel been closed?
+        fn is_closed(&self) -> bool;
 
-    /// Close this channel from the sender side.
-    fn close(&self);
+        /// Close this channel from the sender side.
+        fn close(&self);
+    }
+
+    /// Typedef for a Dyn Inversion Api Handler Callback.
+    pub type InvRawHandlerCbDyn = Arc<
+        dyn Fn(InvUniq, InvAny) -> BoxFuture<'static, InvResult<()>>
+            + 'static
+            + Send
+            + Sync,
+    >;
+
+    /// Inversion Api Handler trait.
+    pub trait AsInvRawHandler: 'static + Send {
+        /// Supply the logic that will be invoken on message receipt.
+        fn handle(self: Box<Self>, cb: InvRawHandlerCbDyn);
+    }
+
+    /// Inversion Api Close trait.
+    pub trait AsInvRawClose: 'static + Send + Sync {
+        /// Has this channel been closed?
+        fn is_closed(&self) -> bool;
+
+        /// Close this channel from the sender side.
+        fn close(&self);
+    }
+
+    /// Inversion Api Sender trait.
+    pub trait AsInvTypedSender: 'static + Send + Sync {
+        /// Type to be emitted via the "emit" method.
+        type EvtSend: serde::Serialize + 'static + Send;
+
+        /// Type to be sent with the "request" method.
+        type ReqSend: serde::Serialize + 'static + Send;
+
+        /// Type to be received with the "request" method.
+        type ResSend: for<'de> serde::Deserialize<'de> + 'static + Send;
+
+        /// Emit data as an event to the remote side of this channel.
+        fn emit(
+            &self,
+            data: Self::EvtSend,
+        ) -> BoxFuture<'static, InvResult<()>>;
+
+        /// Make a request of the remote side of this channel, expecting a response.
+        fn request(
+            &self,
+            data: Self::ReqSend,
+        ) -> BoxFuture<'static, InvResult<Self::ResSend>>;
+
+        /// Has this channel been closed?
+        fn is_closed(&self) -> bool;
+
+        /// Close this channel from the sender side.
+        fn close(&self);
+    }
+
+    /// Typedef for a Dyn Inversion Api Handler Callback.
+    pub type InvTypedHandlerCbDyn<EvtRecv, ReqRecv, ResRecv> = Arc<
+        dyn Fn(
+                TypedIncoming<EvtRecv, ReqRecv, ResRecv>,
+            ) -> BoxFuture<'static, InvResult<()>>
+            + 'static
+            + Send
+            + Sync,
+    >;
+
+    /// Inversion Api Handler trait.
+    pub trait AsInvTypedHandler: 'static + Send {
+        /// Event type received from the sender side.
+        type EvtRecv: for<'de> serde::Deserialize<'de> + 'static + Send;
+
+        /// Request type received from the sender side.
+        type ReqRecv: for<'de> serde::Deserialize<'de> + 'static + Send;
+
+        /// Response type returned to the sender side.
+        type ResRecv: serde::Serialize + 'static + Send;
+
+        /// Supply the logic that will be invoken on message receipt.
+        fn handle(
+            self: Box<Self>,
+            cb: InvTypedHandlerCbDyn<
+                Self::EvtRecv,
+                Self::ReqRecv,
+                Self::ResRecv,
+            >,
+        );
+    }
 }
+use traits::*;
 
 /// Concrete wrapper for a Dyn Inversion Api Sender.
 #[derive(Clone)]
-pub struct InvSender<Data: 'static + Send>(
-    pub Arc<dyn AsInvSender<Data = Data>>,
-);
+pub struct InvRawSender(pub Arc<dyn AsInvRawSender>);
 
-impl<Data: 'static + Send> InvSender<Data> {
+impl InvRawSender {
     /// Send data to the remote end of this "channel".
     pub fn send(
         &self,
-        data: Data,
+        msg_id: InvUniq,
+        data: InvAny,
     ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        AsInvSender::send(&*self.0, data)
+        AsInvRawSender::send(&*self.0, msg_id, data)
     }
 
     /// Has this channel been closed?
     pub fn is_closed(&self) -> bool {
-        AsInvSender::is_closed(&*self.0)
+        AsInvRawSender::is_closed(&*self.0)
     }
 
     /// Close this channel from the sender side.
     pub fn close(&self) {
-        AsInvSender::close(&*self.0)
+        AsInvRawSender::close(&*self.0)
     }
 }
 
-/// Typedef for a Dyn Inversion Api Handler Callback.
-pub type InvHandlerCbDyn<Data> = Arc<
-    dyn Fn(Data) -> BoxFuture<'static, InvResult<()>> + 'static + Send + Sync,
->;
-
-/// Inversion Api Handler trait.
-pub trait AsInvHandler: 'static + Send {
-    /// The data type to be received by this handler.
-    type Data: 'static + Send;
-
-    /// Supply the logic that will be invoken on message receipt.
-    fn handle(self: Box<Self>, cb: InvHandlerCbDyn<Self::Data>);
-}
-
 /// Concrete wrapper for a Dyn Inversion Api Handler.
-pub struct InvHandler<Data: 'static + Send>(
-    pub Box<dyn AsInvHandler<Data = Data>>,
-);
+pub struct InvRawHandler(pub Box<dyn AsInvRawHandler>);
 
-impl<Data: 'static + Send> InvHandler<Data> {
+impl InvRawHandler {
     /// Specify logic to be invoked by this handler on message receipt.
     /// In this form the closure should be Sync, and return a 'static Future.
     pub fn handle<Fut, Cb>(self, cb: Cb)
     where
         Fut: 'static + Send + Future<Output = InvResult<()>>,
-        Cb: 'static + Send + Sync + Fn(Data) -> Fut,
+        Cb: 'static + Send + Sync + Fn(InvUniq, InvAny) -> Fut,
     {
-        let cb = Arc::new(move |data| cb(data).boxed());
-        AsInvHandler::handle(self.0, cb);
+        let cb = Arc::new(move |msg_id, data| cb(msg_id, data).boxed());
+        AsInvRawHandler::handle(self.0, cb);
     }
 
     /// Specify logic to be invoked by this handler on message receipt.
     /// In this form the closure should be Sync, and return a direct result.
     pub fn handle_sync<Cb>(self, cb: Cb)
     where
-        Cb: 'static + Send + Sync + Fn(Data) -> InvResult<()>,
+        Cb: 'static + Send + Sync + Fn(InvUniq, InvAny) -> InvResult<()>,
     {
-        let cb = Arc::new(move |data| {
-            let res = cb(data);
+        let cb = Arc::new(move |msg_id, data| {
+            let res = cb(msg_id, data);
             async move { res }.boxed()
         });
-        AsInvHandler::handle(self.0, cb);
+        AsInvRawHandler::handle(self.0, cb);
     }
 
     /// Specify logic to be invoked by this handler on message receipt.
@@ -101,64 +177,46 @@ impl<Data: 'static + Send> InvHandler<Data> {
     pub fn handle_mut<Fut, Cb>(self, cb: Cb)
     where
         Fut: 'static + Send + Future<Output = InvResult<()>>,
-        Cb: 'static + Send + FnMut(Data) -> Fut,
+        Cb: 'static + Send + FnMut(InvUniq, InvAny) -> Fut,
     {
         let m = Arc::new(Mutex::new(cb));
-        let cb = Arc::new(move |data| (m.lock())(data).boxed());
-        AsInvHandler::handle(self.0, cb)
+        let cb = Arc::new(move |msg_id, data| (m.lock())(msg_id, data).boxed());
+        AsInvRawHandler::handle(self.0, cb)
     }
 
     /// Specify logic to be invoked by this handler on message receipt.
     /// In this form the closure can be FnMut, and return a direct result.
     pub fn handle_mut_sync<Cb>(self, cb: Cb)
     where
-        Cb: 'static + Send + FnMut(Data) -> InvResult<()>,
+        Cb: 'static + Send + FnMut(InvUniq, InvAny) -> InvResult<()>,
     {
         let m = Arc::new(Mutex::new(cb));
-        let cb = Arc::new(move |data| {
-            let res = (m.lock())(data);
+        let cb = Arc::new(move |msg_id, data| {
+            let res = (m.lock())(msg_id, data);
             async move { res }.boxed()
         });
-        AsInvHandler::handle(self.0, cb);
+        AsInvRawHandler::handle(self.0, cb);
     }
-}
-
-/// Inversion Api Close trait.
-pub trait AsInvClose: 'static + Send + Sync {
-    /// Has this channel been closed?
-    fn is_closed(&self) -> bool;
-
-    /// Close this channel from the sender side.
-    fn close(&self);
 }
 
 /// Concrete wrapper for a Dyn Inversion Api Handler.
 #[derive(Clone)]
-pub struct InvClose(pub Arc<dyn AsInvClose>);
+pub struct InvRawClose(pub Arc<dyn AsInvRawClose>);
 
-impl InvClose {
+impl InvRawClose {
     /// Has this channel been closed?
     pub fn is_closed(&self) -> bool {
-        AsInvClose::is_closed(&*self.0)
+        AsInvRawClose::is_closed(&*self.0)
     }
 
     /// Close this channel from the sender side.
     pub fn close(&self) {
-        AsInvClose::close(&*self.0)
+        AsInvRawClose::close(&*self.0)
     }
 }
 
-/// Typedef for Inversion Api Raw Channel Sender.
-pub type InvRawSender2 = InvSender<(InvUniq, InvAny)>;
-
-/// Typedef for Inversion Api Raw Channel Handler.
-pub type InvRawHandler2 = InvHandler<(InvUniq, InvAny)>;
-
-/// Typedef for Inversion Api Raw Channel Close.
-pub type InvRawClose2 = InvClose;
-
 /// Create a raw, low-level channel.
-pub fn raw_channel2() -> (InvRawSender2, InvRawHandler2, InvRawClose2) {
+pub fn raw_channel() -> (InvRawSender, InvRawHandler, InvRawClose) {
     let notify_kill = Arc::new(tokio::sync::Notify::new());
     let (s, r) = tokio::sync::oneshot::channel();
 
@@ -181,7 +239,7 @@ pub fn raw_channel2() -> (InvRawSender2, InvRawHandler2, InvRawClose2) {
         notify_kill: Arc<tokio::sync::Notify>,
         #[allow(clippy::type_complexity)]
         recv_fn: futures::future::Shared<
-            BoxFuture<'static, InvResult<InvHandlerCbDyn<(InvUniq, InvAny)>>>,
+            BoxFuture<'static, InvResult<InvRawHandlerCbDyn>>,
         >,
     }
 
@@ -198,10 +256,12 @@ pub fn raw_channel2() -> (InvRawSender2, InvRawHandler2, InvRawClose2) {
 
     struct S(InvShare<I>);
 
-    impl AsInvSender for S {
-        type Data = (InvUniq, InvAny);
-
-        fn send(&self, data: Self::Data) -> BoxFuture<'static, InvResult<()>> {
+    impl AsInvRawSender for S {
+        fn send(
+            &self,
+            msg_id: InvUniq,
+            data: InvAny,
+        ) -> BoxFuture<'static, InvResult<()>> {
             let inner = self.0.clone();
             let fut = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
@@ -213,7 +273,7 @@ pub fn raw_channel2() -> (InvRawSender2, InvRawHandler2, InvRawClose2) {
                     let sender = recv_fn.await?;
 
                     futures::select_biased! {
-                        res = sender(data).fuse() => {
+                        res = sender(msg_id, data).fuse() => {
                             res
                         }
                         _ = notify_kill.notified().fuse() => {
@@ -238,22 +298,20 @@ pub fn raw_channel2() -> (InvRawSender2, InvRawHandler2, InvRawClose2) {
         }
     }
 
-    impl AsInvClose for S {
+    impl AsInvRawClose for S {
         fn is_closed(&self) -> bool {
-            AsInvSender::is_closed(self)
+            AsInvRawSender::is_closed(self)
         }
 
         fn close(&self) {
-            AsInvSender::close(self)
+            AsInvRawSender::close(self)
         }
     }
 
-    struct H(tokio::sync::oneshot::Sender<InvHandlerCbDyn<(InvUniq, InvAny)>>);
+    struct H(tokio::sync::oneshot::Sender<InvRawHandlerCbDyn>);
 
-    impl AsInvHandler for H {
-        type Data = (InvUniq, InvAny);
-
-        fn handle(self: Box<Self>, cb: InvHandlerCbDyn<Self::Data>) {
+    impl AsInvRawHandler for H {
+        fn handle(self: Box<Self>, cb: InvRawHandlerCbDyn) {
             let _ = self.0.send(cb);
         }
     }
@@ -262,318 +320,10 @@ pub fn raw_channel2() -> (InvRawSender2, InvRawHandler2, InvRawClose2) {
     let handler = Box::new(H(s));
 
     (
-        InvSender(sender.clone()),
-        InvHandler(handler),
-        InvClose(sender),
+        InvRawSender(sender.clone()),
+        InvRawHandler(handler),
+        InvRawClose(sender),
     )
-}
-
-/// Closure type for logic to be used to handle
-/// the receiving end of a raw channel.
-type PrivRawSender = Arc<
-    dyn Fn(InvUniq, InvAny) -> BoxFuture<'static, InvResult<()>>
-        + 'static
-        + Send
-        + Sync,
->;
-
-struct PrivRawCleanup {
-    raw_close: RawClose,
-}
-
-impl Drop for PrivRawCleanup {
-    fn drop(&mut self) {
-        (self.raw_close)();
-    }
-}
-
-/// The sender side of a raw channel must be able to invoke the
-/// receiver side closure. In order to decouple the timing of
-/// specifying the receive logic, and to manage closing the channel,
-/// we use this `InvShare<Shared<_>>` type.
-type PrivRawSenderFut = InvShare<
-    futures::future::Shared<
-        BoxFuture<'static, InvResult<(PrivRawSender, Arc<PrivRawCleanup>)>>,
-    >,
->;
-
-/// A static callback instance that can be used to close this channel.
-/// (Generally, this is used on the receiver side, since it is straight-forward
-/// to close the channel from the sender side).
-pub type RawClose = Arc<dyn Fn() + 'static + Send + Sync>;
-
-fn run_once<F>(f: F) -> RawClose
-where
-    F: FnOnce() + 'static + Send + Sync,
-{
-    let inner = InvShare::new_mutex(f);
-    Arc::new(move || {
-        if let Some(inner) = inner.extract() {
-            inner();
-        }
-    })
-}
-
-/// The raw, low-level sender side of a raw_channel.
-#[derive(Clone)]
-pub struct RawSender(PrivRawSenderFut);
-
-impl RawSender {
-    /// Send a message to the remote end of this channel.
-    pub fn send(
-        &self,
-        id: InvUniq,
-        data: InvAny,
-    ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        let inner = self.0.clone();
-        async move {
-            // first, get the Shared<_> type, if we have not been closed
-            let raw_sender = match inner.share_ref(|i| Ok(i.clone())) {
-                Ok(raw_sender) => raw_sender.clone(),
-                Err(_) => {
-                    return Err(std::io::ErrorKind::ConnectionReset.into())
-                }
-            };
-
-            match async move {
-                // set up a timeout, incase no-one every calls receiver.handle()
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    async move {
-                        // wait on the receive logic closure receiver
-                        // i.e. someone calls receiver.handle()
-                        let (raw_sender, _) = raw_sender.await?;
-
-                        // actually invoke the receiver closure
-                        raw_sender(id, data).await
-                    },
-                )
-                .await
-                .map_err(|_| InvError::from(std::io::ErrorKind::TimedOut))?
-            }
-            .await
-            {
-                Ok(r) => Ok(r),
-                Err(e) => {
-                    // if we get an error at this layer, we want to close
-                    // the channel to free up resources...
-                    // Application layer errors should be encoded in the
-                    // raw type so they don't trigger this.
-                    inner.close();
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    /// Has this channel been closed?
-    pub fn is_closed(&self) -> bool {
-        self.0.is_closed()
-    }
-
-    /// Close this channel from the sender side.
-    pub fn close(&self) {
-        self.0.close();
-    }
-}
-
-/// The raw, low-level receiver side of a raw_channel.
-pub struct RawReceiver(tokio::sync::oneshot::Sender<PrivRawSender>);
-
-impl RawReceiver {
-    /// Specify the logic that will be applied on receipt of messages.
-    pub fn handle<Fut, F>(self, f: F)
-    where
-        Fut: Future<Output = InvResult<()>> + 'static + Send,
-        F: Fn(InvUniq, InvAny) -> Fut + 'static + Send + Sync,
-    {
-        // box up this logic into heap space so we can pass it around
-        let f: PrivRawSender = Arc::new(move |id, data| f(id, data).boxed());
-
-        // forward this logic to the sender side
-        let _ = self.0.send(f);
-    }
-}
-
-/// Create a raw, low-level channel.
-pub fn raw_channel() -> (RawSender, RawReceiver, RawClose) {
-    // kill notification incase we're closed before the receive logic is given
-    let kill_notify = Arc::new(tokio::sync::Notify::new());
-
-    // setup the channel to forward the receive logic to the sender side
-    let (fn_send, fn_recv) = tokio::sync::oneshot::channel::<PrivRawSender>();
-
-    let (inner, inner_init) = InvShare::new_rw_lock_delayed();
-
-    // bundle up a callback for closing this channel
-    let raw_close = {
-        let inner = inner.clone();
-        let kill_notify = kill_notify.clone();
-        run_once(move || {
-            inner.close();
-            kill_notify.notify_waiters();
-        })
-    };
-
-    // wrap up the receive side so it can be held by multiple clones of
-    // the sender side
-    let priv_raw_cleanup = Arc::new(PrivRawCleanup {
-        raw_close: raw_close.clone(),
-    });
-    inner_init(async move {
-        futures::select_biased! {
-            res = fn_recv.fuse() => {
-                let s = res.map_err(|_| InvError::from(std::io::ErrorKind::ConnectionReset))?;
-                Ok((s, priv_raw_cleanup))
-            }
-            _ = kill_notify.notified().fuse() => {
-                Err(std::io::ErrorKind::ConnectionReset.into())
-            }
-        }
-    }.boxed().shared());
-
-    // return the components
-    (RawSender(inner), RawReceiver(fn_send), raw_close)
-}
-
-struct PrivTypedCleanup {
-    close_all: RawClose,
-}
-
-impl Drop for PrivTypedCleanup {
-    fn drop(&mut self) {
-        (self.close_all)();
-    }
-}
-
-type PrivPendingMap =
-    InvShare<HashMap<InvUniq, tokio::sync::oneshot::Sender<InvAny>>>;
-
-struct TypedSenderInner {
-    raw_sender: RawSender,
-    _cleanup: PrivTypedCleanup,
-    pending: PrivPendingMap,
-}
-
-/// Send typed events, or make typed requests of the remote api.
-pub struct TypedSender<EvtSend, ReqSend, ResSend>
-where
-    EvtSend: serde::Serialize + 'static + Send,
-    ReqSend: serde::Serialize + 'static + Send,
-    for<'de> ResSend: serde::Deserialize<'de> + 'static + Send,
-{
-    inner: InvShare<TypedSenderInner>,
-    _phantom: std::marker::PhantomData<&'static (EvtSend, ReqSend, ResSend)>,
-}
-
-impl<EvtSend, ReqSend, ResSend> Clone for TypedSender<EvtSend, ReqSend, ResSend>
-where
-    EvtSend: serde::Serialize + 'static + Send,
-    ReqSend: serde::Serialize + 'static + Send,
-    for<'de> ResSend: serde::Deserialize<'de> + 'static + Send,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<EvtSend, ReqSend, ResSend> TypedSender<EvtSend, ReqSend, ResSend>
-where
-    EvtSend: serde::Serialize + 'static + Send,
-    ReqSend: serde::Serialize + 'static + Send,
-    for<'de> ResSend: serde::Deserialize<'de> + 'static + Send,
-{
-    /// Emit an event to the remote side of this channel.
-    pub fn emit(
-        &self,
-        data: EvtSend,
-    ) -> impl Future<Output = InvResult<()>> + 'static + Send {
-        let inner = self.inner.clone();
-        async move {
-            let raw_sender = inner.share_ref(|i| Ok(i.raw_sender.clone()))?;
-            match raw_sender.send(InvUniq::new_evt(), InvAny::new(data)).await {
-                Ok(r) => Ok(r),
-                Err(e) => {
-                    inner.close();
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    /// Make a request of the remote side of this channel.
-    pub fn request(
-        &self,
-        data: ReqSend,
-    ) -> impl Future<Output = InvResult<ResSend>> + 'static + Send {
-        let inner = self.inner.clone();
-        async move {
-            // before we build up the pending instances, check if we're open.
-            let (raw_sender, pending) = inner
-                .share_ref(|i| Ok((i.raw_sender.clone(), i.pending.clone())))?;
-
-            // build up and insert pending info
-            let req_id = InvUniq::new_req();
-            let res_id = req_id.as_res();
-            let (resp_send, resp_recv) = tokio::sync::oneshot::channel();
-            let resp_recv = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                resp_recv,
-            );
-            let res_id2 = res_id.clone();
-            pending.share_mut(move |i, _| {
-                i.insert(res_id2, resp_send);
-                Ok(())
-            })?;
-
-            // setup a cleanup raii guard
-            struct Cleanup {
-                res_id: InvUniq,
-                pending: PrivPendingMap,
-            }
-
-            impl Drop for Cleanup {
-                fn drop(&mut self) {
-                    let res_id = self.res_id.clone();
-                    let _ = self.pending.share_mut(move |i, _| {
-                        i.remove(&res_id);
-                        Ok(())
-                    });
-                }
-            }
-
-            let _cleanup = Cleanup { res_id, pending };
-
-            // send the request and await the response
-            raw_sender.send(req_id, InvAny::new(data)).await?;
-
-            let data = resp_recv
-                .await
-                .map_err(|_| InvError::from(std::io::ErrorKind::TimedOut))?
-                .map_err(|_| {
-                    InvError::from(std::io::ErrorKind::ConnectionReset)
-                })?;
-
-            if let Ok(data) = data.downcast::<ResSend>() {
-                Ok(data)
-            } else {
-                Err(std::io::ErrorKind::InvalidData.into())
-            }
-        }
-    }
-
-    /// Has this bi-directional channel been closed?
-    pub fn is_closed(&self) -> bool {
-        self.inner.is_closed()
-    }
-
-    /// Close this bi-directional channel.
-    pub fn close(&self) {
-        self.inner.close();
-    }
 }
 
 type TypedRespondCb<ResRecv> =
@@ -606,107 +356,134 @@ pub enum TypedIncoming<
     Request(ReqRecv, TypedRespond<ResRecv>),
 }
 
-type PrivTypedSender<EvtRecv, ReqRecv, ResRecv> = Arc<
-    dyn Fn(
-            TypedIncoming<EvtRecv, ReqRecv, ResRecv>,
-        ) -> BoxFuture<'static, InvResult<()>>
-        + 'static
-        + Send
-        + Sync,
->;
-
-/// Specify logic for handling incoming events and requests from the remote api.
-pub struct TypedReceiver<EvtRecv, ReqRecv, ResRecv>
+/// Concrete wrapper for a Dyn Inversion Api Typed Sender.
+#[derive(Clone)]
+pub struct InvTypedSender<EvtSend, ReqSend, ResSend>(
+    pub  Arc<
+        dyn AsInvTypedSender<
+            EvtSend = EvtSend,
+            ReqSend = ReqSend,
+            ResSend = ResSend,
+        >,
+    >,
+)
 where
-    for<'de> EvtRecv: serde::Deserialize<'de> + 'static + Send,
-    for<'de> ReqRecv: serde::Deserialize<'de> + 'static + Send,
-    ResRecv: serde::Serialize + 'static + Send,
+    EvtSend: serde::Serialize + 'static + Send,
+    ReqSend: serde::Serialize + 'static + Send,
+    ResSend: for<'de> serde::Deserialize<'de> + 'static + Send;
+
+impl<EvtSend, ReqSend, ResSend> InvTypedSender<EvtSend, ReqSend, ResSend>
+where
+    EvtSend: serde::Serialize + 'static + Send,
+    ReqSend: serde::Serialize + 'static + Send,
+    ResSend: for<'de> serde::Deserialize<'de> + 'static + Send,
 {
-    raw_sender: RawSender,
-    raw_receiver: RawReceiver,
-    close_all: RawClose,
-    pending: PrivPendingMap,
-    _phantom: std::marker::PhantomData<&'static (EvtRecv, ReqRecv, ResRecv)>,
+    /// Emit data as an event to the remote side of this channel.
+    pub fn emit(
+        &self,
+        data: EvtSend,
+    ) -> impl Future<Output = InvResult<()>> + 'static + Send {
+        AsInvTypedSender::emit(&*self.0, data)
+    }
+
+    /// Make a request of the remote side of this channel, expecting a response.
+    pub fn request(
+        &self,
+        data: ReqSend,
+    ) -> impl Future<Output = InvResult<ResSend>> {
+        AsInvTypedSender::request(&*self.0, data)
+    }
+
+    /// Has this channel been closed?
+    pub fn is_closed(&self) -> bool {
+        AsInvTypedSender::is_closed(&*self.0)
+    }
+
+    /// Close this channel from the sender side.
+    pub fn close(&self) {
+        AsInvTypedSender::close(&*self.0)
+    }
 }
 
-impl<EvtRecv, ReqRecv, ResRecv> TypedReceiver<EvtRecv, ReqRecv, ResRecv>
+/// Concrete wrapper for a Dyn Typed Inversion Api Handler.
+pub struct InvTypedHandler<EvtRecv, ReqRecv, ResRecv>(
+    pub  Box<
+        dyn AsInvTypedHandler<
+            EvtRecv = EvtRecv,
+            ReqRecv = ReqRecv,
+            ResRecv = ResRecv,
+        >,
+    >,
+)
 where
-    for<'de> EvtRecv: serde::Deserialize<'de> + 'static + Send,
-    for<'de> ReqRecv: serde::Deserialize<'de> + 'static + Send,
+    EvtRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+    ReqRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+    ResRecv: serde::Serialize + 'static + Send;
+
+impl<EvtRecv, ReqRecv, ResRecv> InvTypedHandler<EvtRecv, ReqRecv, ResRecv>
+where
+    EvtRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+    ReqRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
     ResRecv: serde::Serialize + 'static + Send,
 {
-    /// Specify the logic that will be applied on receipt of messages.
-    pub fn handle<Fut, F>(self, f: F)
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure should be Sync, and return a 'static Future.
+    pub fn handle<Fut, Cb>(self, cb: Cb)
     where
-        Fut: Future<Output = InvResult<()>> + 'static + Send,
-        F: Fn(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> Fut
-            + 'static
+        Fut: 'static + Send + Future<Output = InvResult<()>>,
+        Cb: 'static
             + Send
-            + Sync,
+            + Sync
+            + Fn(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> Fut,
     {
-        let Self {
-            raw_sender,
-            raw_receiver,
-            close_all,
-            pending,
-            ..
-        } = self;
+        let cb = Arc::new(move |incoming| cb(incoming).boxed());
+        AsInvTypedHandler::handle(self.0, cb);
+    }
 
-        let f: PrivTypedSender<EvtRecv, ReqRecv, ResRecv> =
-            Arc::new(move |res| f(res).boxed());
-
-        // raii guard to shutdown sender (everything) if receiver is closed
-        struct Cleanup {
-            close_all: RawClose,
-        }
-
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                (self.close_all)();
-            }
-        }
-
-        let cleanup = Cleanup { close_all };
-
-        raw_receiver.handle(move |id, data| {
-            let _cleanup = &cleanup;
-            let raw_sender = raw_sender.clone();
-            let f = f.clone();
-            let pending = pending.clone();
-            async move {
-                if id.is_evt() {
-                    if let Ok(data) = data.downcast::<EvtRecv>() {
-                        f(TypedIncoming::Event(data)).await
-                    } else {
-                        Err(std::io::ErrorKind::InvalidData.into())
-                    }
-                } else if id.is_req() {
-                    if let Ok(data) = data.downcast::<ReqRecv>() {
-                        let respond: TypedRespondCb<ResRecv> =
-                            Box::new(move |res| {
-                                async move {
-                                    let _ = raw_sender
-                                        .send(id.as_res(), InvAny::new(res))
-                                        .await;
-                                }
-                                .boxed()
-                            });
-                        let respond = TypedRespond(respond);
-                        f(TypedIncoming::Request(data, respond)).await
-                    } else {
-                        Err(std::io::ErrorKind::InvalidData.into())
-                    }
-                } else {
-                    // must be a response
-                    if let Ok(Some(respond)) =
-                        pending.share_mut(|i, _| Ok(i.remove(&id)))
-                    {
-                        let _ = respond.send(data);
-                    }
-                    Ok(())
-                }
-            }
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure should be Sync, and return a direct result.
+    pub fn handle_sync<Cb>(self, cb: Cb)
+    where
+        Cb: 'static
+            + Send
+            + Sync
+            + Fn(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> InvResult<()>,
+    {
+        let cb = Arc::new(move |incoming| {
+            let res = cb(incoming);
+            async move { res }.boxed()
         });
+        AsInvTypedHandler::handle(self.0, cb);
+    }
+
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure can be FnMut, and return a 'static Future.
+    pub fn handle_mut<Fut, Cb>(self, cb: Cb)
+    where
+        Fut: 'static + Send + Future<Output = InvResult<()>>,
+        Cb: 'static
+            + Send
+            + FnMut(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> Fut,
+    {
+        let m = Arc::new(Mutex::new(cb));
+        let cb = Arc::new(move |incoming| (m.lock())(incoming).boxed());
+        AsInvTypedHandler::handle(self.0, cb)
+    }
+
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure can be FnMut, and return a direct result.
+    pub fn handle_mut_sync<Cb>(self, cb: Cb)
+    where
+        Cb: 'static
+            + Send
+            + FnMut(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> InvResult<()>,
+    {
+        let m = Arc::new(Mutex::new(cb));
+        let cb = Arc::new(move |incoming| {
+            let res = (m.lock())(incoming);
+            async move { res }.boxed()
+        });
+        AsInvTypedHandler::handle(self.0, cb);
     }
 }
 
@@ -720,77 +497,286 @@ pub fn upgrade_raw_channel<
     ReqRecv,
     ResRecv,
 >(
-    raw_sender: RawSender,
-    raw_receiver: RawReceiver,
-    raw_recv_close: RawClose,
+    raw_sender: InvRawSender,
+    raw_handler: InvRawHandler,
+    raw_recv_close: InvRawClose,
 ) -> (
-    TypedSender<EvtSend, ReqSend, ResSend>,
-    TypedReceiver<EvtRecv, ReqRecv, ResRecv>,
+    InvTypedSender<EvtSend, ReqSend, ResSend>,
+    InvTypedHandler<EvtRecv, ReqRecv, ResRecv>,
 )
 where
     EvtSend: serde::Serialize + 'static + Send,
     ReqSend: serde::Serialize + 'static + Send,
-    for<'de> ResSend: serde::Deserialize<'de> + 'static + Send,
-    for<'de> EvtRecv: serde::Deserialize<'de> + 'static + Send,
-    for<'de> ReqRecv: serde::Deserialize<'de> + 'static + Send,
+    ResSend: for<'de> serde::Deserialize<'de> + 'static + Send,
+    EvtRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+    ReqRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
     ResRecv: serde::Serialize + 'static + Send,
 {
-    let pending: PrivPendingMap = InvShare::new_mutex(HashMap::new());
+    struct I {
+        raw_sender: InvRawSender,
+        raw_recv_close: InvRawClose,
+        pending: HashMap<InvUniq, tokio::sync::oneshot::Sender<InvAny>>,
+    }
 
-    let close_all: RawClose = {
-        let raw_sender = raw_sender.clone();
-        let pending = pending.clone();
-        run_once(move || {
-            raw_sender.close();
-            raw_recv_close();
-            pending.close();
-        })
-    };
+    impl Drop for I {
+        fn drop(&mut self) {
+            self.raw_sender.close();
+            self.raw_recv_close.close();
+            self.pending.clear();
+        }
+    }
 
-    let priv_typed_cleanup = PrivTypedCleanup {
-        close_all: close_all.clone(),
-    };
-
-    let typed_sender = TypedSender {
-        inner: InvShare::new_rw_lock(TypedSenderInner {
-            raw_sender: raw_sender.clone(),
-            _cleanup: priv_typed_cleanup,
-            pending: pending.clone(),
-        }),
-        _phantom: std::marker::PhantomData,
-    };
-
-    let typed_receiver = TypedReceiver {
+    let inner = InvShare::new_rw_lock(I {
         raw_sender,
-        raw_receiver,
-        close_all,
-        pending,
-        _phantom: std::marker::PhantomData,
-    };
+        raw_recv_close,
+        pending: HashMap::new(),
+    });
 
-    (typed_sender, typed_receiver)
+    struct S<EvtSend, ReqSend, ResSend>
+    where
+        EvtSend: serde::Serialize + 'static + Send,
+        ReqSend: serde::Serialize + 'static + Send,
+        ResSend: for<'de> serde::Deserialize<'de> + 'static + Send,
+    {
+        inner: InvShare<I>,
+        #[allow(clippy::type_complexity)]
+        _phantom: std::marker::PhantomData<fn() -> (EvtSend, ReqSend, ResSend)>,
+    }
+
+    impl<EvtSend, ReqSend, ResSend> Drop for S<EvtSend, ReqSend, ResSend>
+    where
+        EvtSend: serde::Serialize + 'static + Send,
+        ReqSend: serde::Serialize + 'static + Send,
+        ResSend: for<'de> serde::Deserialize<'de> + 'static + Send,
+    {
+        fn drop(&mut self) {
+            self.inner.close();
+        }
+    }
+
+    impl<EvtSend, ReqSend, ResSend> AsInvTypedSender
+        for S<EvtSend, ReqSend, ResSend>
+    where
+        EvtSend: serde::Serialize + 'static + Send,
+        ReqSend: serde::Serialize + 'static + Send,
+        ResSend: for<'de> serde::Deserialize<'de> + 'static + Send,
+    {
+        type EvtSend = EvtSend;
+        type ReqSend = ReqSend;
+        type ResSend = ResSend;
+
+        fn emit(
+            &self,
+            data: Self::EvtSend,
+        ) -> BoxFuture<'static, InvResult<()>> {
+            let raw_sender = self.inner.share_ref(|i| Ok(i.raw_sender.clone()));
+            async move {
+                let raw_sender = raw_sender?;
+                raw_sender.send(InvUniq::new_evt(), InvAny::new(data)).await
+            }
+            .boxed()
+        }
+
+        fn request(
+            &self,
+            data: Self::ReqSend,
+        ) -> BoxFuture<'static, InvResult<Self::ResSend>> {
+            // early check
+            if self.inner.is_closed() {
+                return async move {
+                    Err(std::io::ErrorKind::ConnectionReset.into())
+                }
+                .boxed();
+            }
+
+            let req_id = InvUniq::new_req();
+            let res_id = req_id.as_res();
+            let (res_send, res_recv) = tokio::sync::oneshot::channel();
+
+            // setup raii guard to remove the pending item
+            struct Cleanup(InvUniq, InvShare<I>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let res_id = self.0.clone();
+                    let _ = self.1.share_mut(move |i, _| {
+                        i.pending.remove(&res_id);
+                        Ok(())
+                    });
+                }
+            }
+            let cleanup = Cleanup(res_id.clone(), self.inner.clone());
+
+            // insert pending && fetch sender
+            let raw_sender = self.inner.share_mut(move |i, _| {
+                i.pending.insert(res_id, res_send);
+                Ok(i.raw_sender.clone())
+            });
+
+            async move {
+                let _cleanup = cleanup;
+
+                let raw_sender = raw_sender?;
+
+                // send the request
+                raw_sender.send(req_id, InvAny::new(data)).await?;
+
+                // await the response
+                let res_recv = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    res_recv,
+                );
+                let res = res_recv
+                    .await
+                    .map_err(|_| InvError::from(std::io::ErrorKind::TimedOut))?
+                    .map_err(|_| {
+                        InvError::from(std::io::ErrorKind::ConnectionReset)
+                    })?;
+                if let Ok(res) = res.downcast::<Self::ResSend>() {
+                    Ok(res)
+                } else {
+                    Err(std::io::ErrorKind::InvalidData.into())
+                }
+            }
+            .boxed()
+        }
+
+        fn is_closed(&self) -> bool {
+            self.inner.is_closed()
+        }
+
+        fn close(&self) {
+            self.inner.close();
+        }
+    }
+
+    struct H<EvtRecv, ReqRecv, ResRecv>
+    where
+        EvtRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+        ReqRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+        ResRecv: serde::Serialize + 'static + Send,
+    {
+        inner: InvShare<I>,
+        raw_handler: InvRawHandler,
+        #[allow(clippy::type_complexity)]
+        _phantom: std::marker::PhantomData<fn() -> (EvtRecv, ReqRecv, ResRecv)>,
+    }
+
+    impl<EvtRecv, ReqRecv, ResRecv> AsInvTypedHandler
+        for H<EvtRecv, ReqRecv, ResRecv>
+    where
+        EvtRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+        ReqRecv: for<'de> serde::Deserialize<'de> + 'static + Send,
+        ResRecv: serde::Serialize + 'static + Send,
+    {
+        type EvtRecv = EvtRecv;
+        type ReqRecv = ReqRecv;
+        type ResRecv = ResRecv;
+
+        fn handle(
+            self: Box<Self>,
+            cb: InvTypedHandlerCbDyn<
+                Self::EvtRecv,
+                Self::ReqRecv,
+                Self::ResRecv,
+            >,
+        ) {
+            let Self {
+                inner, raw_handler, ..
+            } = *self;
+
+            // raii guard to close if this receiver logic is dropped
+            struct Cleanup(InvShare<I>);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    self.0.close();
+                }
+            }
+            let cleanup = Cleanup(inner.clone());
+
+            raw_handler.handle(move |id, data| {
+                let _cleanup = &cleanup;
+                let inner = inner.clone();
+                let cb = cb.clone();
+                async move {
+                    if id.is_evt() {
+                        if let Ok(data) = data.downcast::<EvtRecv>() {
+                            cb(TypedIncoming::Event(data)).await
+                        } else {
+                            Err(std::io::ErrorKind::InvalidData.into())
+                        }
+                    } else if id.is_req() {
+                        if let Ok(data) = data.downcast::<ReqRecv>() {
+                            let respond: TypedRespondCb<ResRecv> =
+                                Box::new(move |res| {
+                                    if let Ok(raw_sender) = inner
+                                        .share_ref(|i| Ok(i.raw_sender.clone()))
+                                    {
+                                        async move {
+                                            let _ = raw_sender
+                                                .send(
+                                                    id.as_res(),
+                                                    InvAny::new(res),
+                                                )
+                                                .await;
+                                        }
+                                        .boxed()
+                                    } else {
+                                        async move {}.boxed()
+                                    }
+                                });
+                            let respond = TypedRespond(respond);
+                            cb(TypedIncoming::Request(data, respond)).await
+                        } else {
+                            Err(std::io::ErrorKind::InvalidData.into())
+                        }
+                    } else {
+                        // must be a response
+                        if let Ok(Some(respond)) =
+                            inner.share_mut(|i, _| Ok(i.pending.remove(&id)))
+                        {
+                            let _ = respond.send(data);
+                        }
+                        Ok(())
+                    }
+                }
+            });
+        }
+    }
+
+    let sender = InvTypedSender(Arc::new(S {
+        inner: inner.clone(),
+        _phantom: std::marker::PhantomData,
+    }));
+
+    let handler = InvTypedHandler(Box::new(H {
+        inner,
+        raw_handler,
+        _phantom: std::marker::PhantomData,
+    }));
+
+    (sender, handler)
 }
 
 /// Typedef for a TypedSender where all the types are the same.
-pub type UnitypedSender<T> = TypedSender<T, T, T>;
+pub type InvUnitypedSender<T> = InvTypedSender<T, T, T>;
 
 /// Typedef for a TypedSender where all the types are the same.
-pub type UnitypedReceiver<T> = TypedReceiver<T, T, T>;
+pub type InvUnitypedHandler<T> = InvTypedHandler<T, T, T>;
 
 /// Delegates to `upgrade_raw_channel` but with the same type for all types.
 pub fn unitype_upgrade_raw_channel<T>(
-    raw_sender: RawSender,
-    raw_receiver: RawReceiver,
-    raw_recv_close: RawClose,
-) -> (UnitypedSender<T>, UnitypedReceiver<T>)
+    raw_sender: InvRawSender,
+    raw_handler: InvRawHandler,
+    raw_recv_close: InvRawClose,
+) -> (InvUnitypedSender<T>, InvUnitypedHandler<T>)
 where
-    for<'de> T: serde::Serialize + serde::Deserialize<'de> + 'static + Send,
+    T: for<'de> serde::Deserialize<'de> + serde::Serialize + 'static + Send,
 {
-    upgrade_raw_channel(raw_sender, raw_receiver, raw_recv_close)
+    upgrade_raw_channel(raw_sender, raw_handler, raw_recv_close)
 }
 
 type PrivFactorySender = Arc<
-    dyn Fn(RawSender, RawReceiver, RawClose) -> InvResult<()>
+    dyn Fn(InvRawSender, InvRawHandler, InvRawClose) -> InvResult<()>
         + 'static
         + Send
         + Sync,
@@ -803,7 +789,7 @@ impl FactoryReceiver {
     /// Specify the logic that will be applied on receipt of incoming bindings.
     pub fn handle<F>(self, f: F)
     where
-        F: Fn(RawSender, RawReceiver, RawClose) -> InvResult<()>
+        F: Fn(InvRawSender, InvRawHandler, InvRawClose) -> InvResult<()>
             + 'static
             + Send
             + Sync,
@@ -839,7 +825,7 @@ pub trait AsInvBroker: 'static + Send + Sync {
     fn bind_to_impl_raw(
         &self,
         impl_spec: ImplSpec,
-    ) -> BoxFuture<'static, InvResult<(RawSender, RawReceiver, RawClose)>>;
+    ) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>;
 }
 
 /// inversion broker type handle
@@ -868,7 +854,7 @@ impl InvBroker {
     pub fn bind_to_impl_raw(
         &self,
         impl_spec: ImplSpec,
-    ) -> impl Future<Output = InvResult<(RawSender, RawReceiver, RawClose)>>
+    ) -> impl Future<Output = InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>
     {
         self.0.bind_to_impl_raw(impl_spec)
     }
@@ -932,7 +918,8 @@ impl AsInvBroker for PrivBroker {
     fn bind_to_impl_raw(
         &self,
         impl_spec: ImplSpec,
-    ) -> BoxFuture<'static, InvResult<(RawSender, RawReceiver, RawClose)>> {
+    ) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>
+    {
         let inner = self.0.clone();
         async move {
             let sender = match inner
@@ -1000,40 +987,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_raw_channel2() {
-        // create the unidirectional channel
-        let (send, recv, close) = raw_channel2();
-
-        // add the handle logic
-        recv.handle(move |(id, data)| {
-            let close = close.clone();
-            async move {
-                let data = data.downcast::<isize>().unwrap();
-                println!("{:?} {:?}", id, data);
-                assert_eq!("evt", &format!("{}", id));
-                assert_eq!(42, data);
-                // close the channel after a single event
-                close.close();
-                Ok(())
-            }
-        });
-
-        // send the event
-        send.send((InvUniq::new_evt(), InvAny::new(42_isize)))
-            .await
-            .unwrap();
-
-        // should be closed
-        assert!(send.is_closed());
-
-        // now closed, we should error out
-        assert!(send
-            .send((InvUniq::new_evt(), InvAny::new(42_isize)))
-            .await
-            .is_err());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn test_raw_channel() {
         // create the unidirectional channel
         let (send, recv, close) = raw_channel();
@@ -1047,7 +1000,7 @@ mod tests {
                 assert_eq!("evt", &format!("{}", id));
                 assert_eq!(42, data);
                 // close the channel after a single event
-                close();
+                close.close();
                 Ok(())
             }
         });
@@ -1077,7 +1030,7 @@ mod tests {
         recv1.handle(move |incoming| async move {
             match incoming {
                 TypedIncoming::Event(evt) => {
-                    println!("evt: {:?}", evt);
+                    println!("1evt: {:?}", evt);
                     assert_eq!(69, evt);
                 }
                 TypedIncoming::Request(data, respond) => {
@@ -1092,7 +1045,7 @@ mod tests {
         recv2.handle(move |incoming| async move {
             match incoming {
                 TypedIncoming::Event(evt) => {
-                    println!("evt: {:?}", evt);
+                    println!("2evt: {:?}", evt);
                     assert_eq!(42, evt);
                 }
                 TypedIncoming::Request(data, respond) => {
@@ -1106,12 +1059,14 @@ mod tests {
         snd2.emit(69).await.unwrap();
 
         let res = snd1.request(42).await.unwrap();
-        println!("res: {:?}", res);
+        println!("1res: {:?}", res);
         assert_eq!(41, res);
 
         let res = snd2.request(42).await.unwrap();
-        println!("res: {:?}", res);
+        println!("2res: {:?}", res);
         assert_eq!(43, res);
+
+        println!("done, about to drop");
     }
 
     #[tokio::test(flavor = "multi_thread")]
