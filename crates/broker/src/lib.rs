@@ -6,8 +6,10 @@
 pub mod inv_any;
 pub mod inv_api_spec;
 pub mod inv_broker;
+pub mod inv_codec;
 pub mod inv_error;
 pub mod inv_id;
+pub mod inv_loader;
 pub mod inv_share;
 pub mod inv_uniq;
 
