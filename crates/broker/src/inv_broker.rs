@@ -42,7 +42,7 @@ pub mod traits {
 
     /// Inversion Api Handler trait.
     pub trait AsInvRawHandler: 'static + Send {
-        /// Supply the logic that will be invoken on message receipt.
+        /// Supply the logic that will be invoked on message receipt.
         fn handle(self: Box<Self>, cb: InvRawHandlerCbDyn);
     }
 
@@ -88,7 +88,7 @@ pub mod traits {
     /// Typedef for a Dyn Inversion Api Handler Callback.
     pub type InvTypedHandlerCbDyn<EvtRecv, ReqRecv, ResRecv> = Arc<
         dyn Fn(
-                TypedIncoming<EvtRecv, ReqRecv, ResRecv>,
+                InvTypedIncoming<EvtRecv, ReqRecv, ResRecv>,
             ) -> BoxFuture<'static, InvResult<()>>
             + 'static
             + Send
@@ -106,7 +106,7 @@ pub mod traits {
         /// Response type returned to the sender side.
         type ResRecv: serde::Serialize + 'static + Send;
 
-        /// Supply the logic that will be invoken on message receipt.
+        /// Supply the logic that will be invoked on message receipt.
         fn handle(
             self: Box<Self>,
             cb: InvTypedHandlerCbDyn<
@@ -115,6 +115,40 @@ pub mod traits {
                 Self::ResRecv,
             >,
         );
+    }
+
+    /// Typedef for a Dyn Inversion Api Factory Handler Callback.
+    pub type InvFactoryHandlerCbDyn = Arc<
+        dyn Fn(InvRawSender, InvRawHandler, InvRawClose) -> InvResult<()>
+            + 'static
+            + Send
+            + Sync,
+    >;
+
+    /// Inversion Api FactoryHandler trait.
+    pub trait AsInvFactoryHandler: 'static + Send {
+        /// Supply the logic that will be invoked on incoming bind request.
+        fn handle(self: Box<Self>, cb: InvFactoryHandlerCbDyn);
+    }
+
+    /// inversion broker trait
+    pub trait AsInvBroker: 'static + Send + Sync {
+        /// Register a new api impl to this broker
+        fn register_impl_raw(
+            &self,
+            impl_spec: ImplSpec,
+        ) -> BoxFuture<'static, InvResult<InvFactoryHandler>>;
+
+        /// Bind to a registered api implementation
+        /// TODO - for now we only support this binding to an exact impl,
+        ///        someday we can add ApiSpec / feature matching.
+        fn bind_to_impl_raw(
+            &self,
+            impl_spec: ImplSpec,
+        ) -> BoxFuture<
+            'static,
+            InvResult<(InvRawSender, InvRawHandler, InvRawClose)>,
+        >;
     }
 }
 use traits::*;
@@ -216,7 +250,7 @@ impl InvRawClose {
 }
 
 /// Create a raw, low-level channel.
-pub fn raw_channel() -> (InvRawSender, InvRawHandler, InvRawClose) {
+pub fn inv_raw_channel() -> (InvRawSender, InvRawHandler, InvRawClose) {
     let notify_kill = Arc::new(tokio::sync::Notify::new());
     let (s, r) = tokio::sync::oneshot::channel();
 
@@ -331,9 +365,9 @@ type TypedRespondCb<ResRecv> =
 
 /// Respond to an incoming typed request from the remote api.
 /// Drop this instance to generate a ConnectionReset error on the remote.
-pub struct TypedRespond<ResRecv: 'static + Send>(TypedRespondCb<ResRecv>);
+pub struct InvTypedRespond<ResRecv: 'static + Send>(TypedRespondCb<ResRecv>);
 
-impl<ResRecv: 'static + Send> TypedRespond<ResRecv> {
+impl<ResRecv: 'static + Send> InvTypedRespond<ResRecv> {
     /// Submit the response to the remote end.
     pub fn respond(
         self,
@@ -344,7 +378,7 @@ impl<ResRecv: 'static + Send> TypedRespond<ResRecv> {
 }
 
 /// Incoming events and requests from the remote api.
-pub enum TypedIncoming<
+pub enum InvTypedIncoming<
     EvtRecv: 'static + Send,
     ReqRecv: 'static + Send,
     ResRecv: 'static + Send,
@@ -353,7 +387,7 @@ pub enum TypedIncoming<
     Event(EvtRecv),
 
     /// An incoming message of type request that requires a direct response.
-    Request(ReqRecv, TypedRespond<ResRecv>),
+    Request(ReqRecv, InvTypedRespond<ResRecv>),
 }
 
 /// Concrete wrapper for a Dyn Inversion Api Typed Sender.
@@ -434,7 +468,7 @@ where
         Cb: 'static
             + Send
             + Sync
-            + Fn(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> Fut,
+            + Fn(InvTypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> Fut,
     {
         let cb = Arc::new(move |incoming| cb(incoming).boxed());
         AsInvTypedHandler::handle(self.0, cb);
@@ -447,7 +481,7 @@ where
         Cb: 'static
             + Send
             + Sync
-            + Fn(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> InvResult<()>,
+            + Fn(InvTypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> InvResult<()>,
     {
         let cb = Arc::new(move |incoming| {
             let res = cb(incoming);
@@ -463,7 +497,7 @@ where
         Fut: 'static + Send + Future<Output = InvResult<()>>,
         Cb: 'static
             + Send
-            + FnMut(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> Fut,
+            + FnMut(InvTypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> Fut,
     {
         let m = Arc::new(Mutex::new(cb));
         let cb = Arc::new(move |incoming| (m.lock())(incoming).boxed());
@@ -476,7 +510,7 @@ where
     where
         Cb: 'static
             + Send
-            + FnMut(TypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> InvResult<()>,
+            + FnMut(InvTypedIncoming<EvtRecv, ReqRecv, ResRecv>) -> InvResult<()>,
     {
         let m = Arc::new(Mutex::new(cb));
         let cb = Arc::new(move |incoming| {
@@ -489,7 +523,7 @@ where
 
 /// Given bi-directional raw handles to a remote (one sender, one receiver),
 /// set up a typed, request/response enabled high-level channel.
-pub fn upgrade_raw_channel<
+pub fn upgrade_inv_raw_channel<
     EvtSend,
     ReqSend,
     ResSend,
@@ -700,7 +734,7 @@ where
                 async move {
                     if id.is_evt() {
                         if let Ok(data) = data.downcast::<EvtRecv>() {
-                            cb(TypedIncoming::Event(data)).await
+                            cb(InvTypedIncoming::Event(data)).await
                         } else {
                             Err(std::io::ErrorKind::InvalidData.into())
                         }
@@ -724,8 +758,8 @@ where
                                         async move {}.boxed()
                                     }
                                 });
-                            let respond = TypedRespond(respond);
-                            cb(TypedIncoming::Request(data, respond)).await
+                            let respond = InvTypedRespond(respond);
+                            cb(InvTypedIncoming::Request(data, respond)).await
                         } else {
                             Err(std::io::ErrorKind::InvalidData.into())
                         }
@@ -763,8 +797,8 @@ pub type InvUnitypedSender<T> = InvTypedSender<T, T, T>;
 /// Typedef for a TypedSender where all the types are the same.
 pub type InvUnitypedHandler<T> = InvTypedHandler<T, T, T>;
 
-/// Delegates to `upgrade_raw_channel` but with the same type for all types.
-pub fn unitype_upgrade_raw_channel<T>(
+/// Delegates to `upgrade_inv_raw_channel` but with the same type for all types.
+pub fn unitype_upgrade_inv_raw_channel<T>(
     raw_sender: InvRawSender,
     raw_handler: InvRawHandler,
     raw_recv_close: InvRawClose,
@@ -772,60 +806,40 @@ pub fn unitype_upgrade_raw_channel<T>(
 where
     T: for<'de> serde::Deserialize<'de> + serde::Serialize + 'static + Send,
 {
-    upgrade_raw_channel(raw_sender, raw_handler, raw_recv_close)
+    upgrade_inv_raw_channel(raw_sender, raw_handler, raw_recv_close)
 }
 
-type PrivFactorySender = Arc<
-    dyn Fn(InvRawSender, InvRawHandler, InvRawClose) -> InvResult<()>
-        + 'static
-        + Send
-        + Sync,
->;
+/// Concrete wrapper for a Dyn Inversion Api Factory Handler.
+pub struct InvFactoryHandler(pub Box<dyn AsInvFactoryHandler>);
 
-/// Receive an incoming bind request to a registered api implementation.
-pub struct FactoryReceiver(ImplSpec, InvShare<PrivBrokerInner>);
-
-impl FactoryReceiver {
-    /// Specify the logic that will be applied on receipt of incoming bindings.
-    pub fn handle<F>(self, f: F)
+impl InvFactoryHandler {
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure should be Sync, and return a direct result.
+    pub fn handle_sync<Cb>(self, cb: Cb)
     where
-        F: Fn(InvRawSender, InvRawHandler, InvRawClose) -> InvResult<()>
-            + 'static
+        Cb: 'static
             + Send
-            + Sync,
+            + Sync
+            + Fn(InvRawSender, InvRawHandler, InvRawClose) -> InvResult<()>,
     {
-        let Self(impl_spec, inner) = self;
-        let s: PrivFactorySender = Arc::new(f);
-        let n = inner
-            .share_mut(move |i, _| match i.map.entry(impl_spec) {
-                std::collections::hash_map::Entry::Occupied(mut e) => {
-                    match e.insert(PrivPendingFactorySender::Ready(s)) {
-                        PrivPendingFactorySender::Pending(n) => Ok(n),
-                        _ => unreachable!(),
-                    }
-                }
-                _ => unreachable!(),
-            })
-            .expect("should be impossible to set factory sender");
-        n.notify_waiters();
+        let cb = Arc::new(cb);
+        AsInvFactoryHandler::handle(self.0, cb);
     }
-}
 
-/// inversion broker trait
-pub trait AsInvBroker: 'static + Send + Sync {
-    /// Register a new api impl to this broker
-    fn register_impl_raw(
-        &self,
-        impl_spec: ImplSpec,
-    ) -> BoxFuture<'static, InvResult<FactoryReceiver>>;
-
-    /// Bind to a registered api implementation
-    /// TODO - for now we only support this binding to an exact impl,
-    ///        someday we can add ApiSpec / feature matching.
-    fn bind_to_impl_raw(
-        &self,
-        impl_spec: ImplSpec,
-    ) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>;
+    /// Specify logic to be invoked by this handler on message receipt.
+    /// In this form the closure can be FnMut, and return a direct result.
+    pub fn handle_mut_sync<Cb>(self, cb: Cb)
+    where
+        Cb: 'static
+            + Send
+            + FnMut(InvRawSender, InvRawHandler, InvRawClose) -> InvResult<()>,
+    {
+        let m = Arc::new(Mutex::new(cb));
+        let cb = Arc::new(move |sender, handler, close| {
+            (m.lock())(sender, handler, close)
+        });
+        AsInvFactoryHandler::handle(self.0, cb);
+    }
 }
 
 /// inversion broker type handle
@@ -844,7 +858,7 @@ impl InvBroker {
     pub fn register_impl_raw(
         &self,
         impl_spec: ImplSpec,
-    ) -> impl Future<Output = InvResult<FactoryReceiver>> {
+    ) -> impl Future<Output = InvResult<InvFactoryHandler>> {
         self.0.register_impl_raw(impl_spec)
     }
 
@@ -861,7 +875,7 @@ impl InvBroker {
 }
 
 /// construct a new inversion api broker
-pub fn new_broker() -> InvBroker {
+pub fn new_inv_broker() -> InvBroker {
     InvBroker(Arc::new(PrivBroker::new()))
 }
 
@@ -870,7 +884,7 @@ pub fn new_broker() -> InvBroker {
 #[derive(Clone)]
 enum PrivPendingFactorySender {
     Pending(Arc<tokio::sync::Notify>),
-    Ready(PrivFactorySender),
+    Ready(InvFactoryHandlerCbDyn),
 }
 
 struct PrivBrokerInner {
@@ -891,7 +905,7 @@ impl AsInvBroker for PrivBroker {
     fn register_impl_raw(
         &self,
         impl_spec: ImplSpec,
-    ) -> BoxFuture<'static, InvResult<FactoryReceiver>> {
+    ) -> BoxFuture<'static, InvResult<InvFactoryHandler>> {
         let inner = self.0.clone();
         async move {
             let notify = Arc::new(tokio::sync::Notify::new());
@@ -908,9 +922,36 @@ impl AsInvBroker for PrivBroker {
                 Ok(())
             })?;
 
-            let recv = FactoryReceiver(impl_spec, inner);
+            struct H(ImplSpec, InvShare<PrivBrokerInner>);
 
-            Ok(recv)
+            impl AsInvFactoryHandler for H {
+                fn handle(self: Box<Self>, cb: InvFactoryHandlerCbDyn) {
+                    let Self(impl_spec, inner) = *self;
+                    let n = inner
+                        .share_mut(move |i, _| match i.map.entry(impl_spec) {
+                            std::collections::hash_map::Entry::Occupied(
+                                mut e,
+                            ) => {
+                                match e
+                                    .insert(PrivPendingFactorySender::Ready(cb))
+                                {
+                                    PrivPendingFactorySender::Pending(n) => {
+                                        Ok(n)
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+                            _ => unreachable!(),
+                        })
+                        .expect("should be impossible to set factory sender");
+                    n.notify_waiters();
+                }
+            }
+
+            let h = InvFactoryHandler(Box::new(H(impl_spec, inner)));
+            //let recv = InvFactoryReceiver(impl_spec, inner);
+
+            Ok(h)
         }
         .boxed()
     }
@@ -942,8 +983,8 @@ impl AsInvBroker for PrivBroker {
                 PrivPendingFactorySender::Ready(sender) => sender,
             };
 
-            let (raw_send1, raw_recv2, raw_close2) = raw_channel();
-            let (raw_send2, raw_recv1, raw_close1) = raw_channel();
+            let (raw_send1, raw_recv2, raw_close2) = inv_raw_channel();
+            let (raw_send2, raw_recv1, raw_close1) = inv_raw_channel();
 
             sender(raw_send1, raw_recv1, raw_close1)?;
 
@@ -956,8 +997,6 @@ impl AsInvBroker for PrivBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    //use crate::inv_id::InvId;
-    //use std::sync::atomic;
 
     #[test]
     fn test_specs() {
@@ -989,7 +1028,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_raw_channel() {
         // create the unidirectional channel
-        let (send, recv, close) = raw_channel();
+        let (send, recv, close) = inv_raw_channel();
 
         // add the handle logic
         recv.handle(move |id, data| {
@@ -1022,33 +1061,35 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_typed_channel() {
-        let (snd1, recv2, c2) = raw_channel();
-        let (snd2, recv1, c1) = raw_channel();
+        let (snd1, recv2, c2) = inv_raw_channel();
+        let (snd2, recv1, c1) = inv_raw_channel();
 
-        let (snd1, recv1) = unitype_upgrade_raw_channel::<u32>(snd1, recv1, c1);
+        let (snd1, recv1) =
+            unitype_upgrade_inv_raw_channel::<u32>(snd1, recv1, c1);
 
         recv1.handle(move |incoming| async move {
             match incoming {
-                TypedIncoming::Event(evt) => {
+                InvTypedIncoming::Event(evt) => {
                     println!("1evt: {:?}", evt);
                     assert_eq!(69, evt);
                 }
-                TypedIncoming::Request(data, respond) => {
+                InvTypedIncoming::Request(data, respond) => {
                     respond.respond(data + 1).await;
                 }
             }
             Ok(())
         });
 
-        let (snd2, recv2) = unitype_upgrade_raw_channel::<u32>(snd2, recv2, c2);
+        let (snd2, recv2) =
+            unitype_upgrade_inv_raw_channel::<u32>(snd2, recv2, c2);
 
         recv2.handle(move |incoming| async move {
             match incoming {
-                TypedIncoming::Event(evt) => {
+                InvTypedIncoming::Event(evt) => {
                     println!("2evt: {:?}", evt);
                     assert_eq!(42, evt);
                 }
-                TypedIncoming::Request(data, respond) => {
+                InvTypedIncoming::Request(data, respond) => {
                     respond.respond(data - 1).await;
                 }
             }
@@ -1073,11 +1114,11 @@ mod tests {
     async fn test_inv_broker() {
         let impl_spec = Arc::new(ImplSpecInner::default());
 
-        let broker = new_broker();
+        let broker = new_inv_broker();
 
         let f = broker.register_impl_raw(impl_spec.clone()).await.unwrap();
-        f.handle(|s, r, c| {
-            let (s, r) = unitype_upgrade_raw_channel::<isize>(s, r, c);
+        f.handle_sync(|s, r, c| {
+            let (s, r) = unitype_upgrade_inv_raw_channel::<isize>(s, r, c);
             let s2 = s.clone();
             tokio::task::spawn(async move {
                 s2.emit(11).await.unwrap();
@@ -1087,11 +1128,11 @@ mod tests {
                 let s = s.clone();
                 async move {
                     match inc {
-                        TypedIncoming::Event(evt) => {
+                        InvTypedIncoming::Event(evt) => {
                             println!("impl evt: {:?}", evt);
                             println!("impl req: {:?}", s.request(42).await?);
                         }
-                        TypedIncoming::Request(req, resp) => {
+                        InvTypedIncoming::Request(req, resp) => {
                             s.emit(req).await?;
                             resp.respond(req + 1).await;
                         }
@@ -1103,13 +1144,13 @@ mod tests {
         });
 
         let (s, r, c) = broker.bind_to_impl_raw(impl_spec).await.unwrap();
-        let (s, r) = unitype_upgrade_raw_channel::<isize>(s, r, c);
+        let (s, r) = unitype_upgrade_inv_raw_channel::<isize>(s, r, c);
         r.handle(|inc| async move {
             match inc {
-                TypedIncoming::Event(evt) => {
+                InvTypedIncoming::Event(evt) => {
                     println!("bind evt: {:?}", evt);
                 }
-                TypedIncoming::Request(req, resp) => {
+                InvTypedIncoming::Request(req, resp) => {
                     resp.respond(req + 1).await;
                 }
             }
