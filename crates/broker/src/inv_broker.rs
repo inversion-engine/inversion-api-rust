@@ -949,7 +949,6 @@ impl AsInvBroker for PrivBroker {
             }
 
             let h = InvFactoryHandler(Box::new(H(impl_spec, inner)));
-            //let recv = InvFactoryReceiver(impl_spec, inner);
 
             Ok(h)
         }
