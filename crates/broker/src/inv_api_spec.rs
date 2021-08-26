@@ -79,8 +79,10 @@ impl std::fmt::Debug for FeatureDef {
     }
 }
 
+/// Inversion Api ApiSpecId type.
+pub type ApiSpecId = Arc<str>;
+
 /// Spec representing an Inversion API.
-#[non_exhaustive]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ApiSpecInner {
     /// top level categorization.
@@ -97,6 +99,18 @@ pub struct ApiSpecInner {
 
     /// feature list associated with this spec.
     pub api_features: Box<[FeatureDef]>,
+}
+
+impl ApiSpecInner {
+    /// Generate the canonical ApiSpecId for this ApiSpec
+    pub fn to_api_id(&self) -> ApiSpecId {
+        format!(
+            "{}.{}.{}.{}",
+            self.api_cat1, self.api_cat2, self.api_name, self.api_revision,
+        )
+        .into_boxed_str()
+        .into()
+    }
 }
 
 impl Default for ApiSpecInner {
@@ -167,8 +181,10 @@ impl std::fmt::Debug for ApiSpecInner {
 /// Inversion Api ApiSpec type.
 pub type ApiSpec = Arc<ApiSpecInner>;
 
+/// Inversion Api ImplSpecId type.
+pub type ImplSpecId = Arc<str>;
+
 /// Spec representing an Inversion API implementation.
-#[non_exhaustive]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ImplSpecInner {
     /// Api spec this impl is implementing.
@@ -182,6 +198,20 @@ pub struct ImplSpecInner {
 
     /// feature impl list associated with this spec.
     pub impl_features: Box<[Box<str>]>,
+}
+
+impl ImplSpecInner {
+    /// Generate the canonical ImplSpecId for this ImplSpec
+    pub fn to_impl_id(&self) -> ImplSpecId {
+        format!(
+            "{}.{}.{}",
+            self.api_spec.to_api_id(),
+            self.impl_name,
+            self.impl_revision,
+        )
+        .into_boxed_str()
+        .into()
+    }
 }
 
 impl Default for ImplSpecInner {

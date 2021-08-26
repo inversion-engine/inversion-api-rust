@@ -38,6 +38,41 @@ enum InvAnyInner {
 /// transfer item with some optimizations to try to avoid serialization
 pub struct InvAny(InvAnyInner);
 
+impl std::fmt::Debug for InvAny {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            InvAnyInner::Ser(d) => write!(f, "InvAny(Ser({} bytes))", d.len()),
+            InvAnyInner::Ptr { .. } => write!(f, "InvAny(Ptr)"),
+        }
+    }
+}
+
+impl serde::Serialize for InvAny {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let bytes = match &self.0 {
+            InvAnyInner::Ser(b) => b.to_vec(),
+            InvAnyInner::Ptr { p_ser, .. } => {
+                p_ser().map_err(|e| serde::ser::Error::custom(e))?
+            }
+        };
+
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for InvAny {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let d: Box<[u8]> = serde::Deserialize::deserialize(deserializer)?;
+        Ok(Self(InvAnyInner::Ser(d)))
+    }
+}
+
 impl InvAny {
     /// constructor from bytes
     pub fn from_bytes(b: Box<[u8]>) -> Self {

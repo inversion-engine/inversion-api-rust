@@ -1,11 +1,14 @@
 //! inversion engine serialization codec
 
 use futures::future::{BoxFuture, FutureExt};
+use futures::sink::SinkExt;
 
 use parking_lot::Mutex;
 
+use crate::inv_any::*;
 use crate::inv_api_spec::*;
 use crate::inv_error::*;
+use crate::inv_uniq::*;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -24,8 +27,71 @@ pub mod traits {
             impl_spec: ImplSpec,
         ) -> BoxFuture<'static, InvResult<()>>;
     }
+
+    /// Establish a message bus between a local InvBroker and a remote.
+    /// This is the handler side.
+    pub trait AsInvCodecHandler: 'static + Send {}
 }
 use traits::*;
+
+/// Serialization format for InvCodec Message Bus.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InvCodecMessage {
+    /// Notify the remote end of a new local ImplSpec
+    NewImplSpec {
+        /// the ImplSpec
+        impl_spec: ImplSpec,
+    },
+
+    /// A process local to the sender of this message is requesting
+    /// to bind to an Impl on the receiver of this message.
+    NewImplBindingReq {
+        /// the request id for relating the result of the binding
+        req_id: InvUniq,
+
+        /// a uniq id to use for messages related to this binding
+        binding_id: InvUniq,
+
+        /// the impl id to bind to
+        impl_id: ImplSpecId,
+    },
+
+    /// if the binding was successful, return this message
+    NewImplBindingRes {
+        /// the uniq binding_id sent with the Req
+        binding_id: InvUniq,
+
+        /// if None, the result was a success.
+        /// if Some, the result of the binding was an error,
+        /// this string will be the error reason.
+        error: Option<Box<str>>,
+    },
+
+    /// a bus message from a bound protocol
+    BoundMessage {
+        /// the uniq id associated with this binding
+        binding_id: InvUniq,
+
+        /// the msg_id for this specific message
+        msg_id: InvUniq,
+
+        /// the data content of this message
+        data: InvAny,
+    },
+}
+
+impl InvCodecMessage {
+    /// Serialize
+    pub fn encode(self) -> Vec<u8> {
+        use serde::Serialize;
+        let mut se = rmp_serde::encode::Serializer::new(Vec::new())
+            .with_struct_map()
+            .with_string_variants();
+        self.serialize(&mut se).expect("failed serialize");
+        se.into_inner()
+    }
+}
 
 /// Establish a message bus between a local InvBroker and a remote InvBroker.
 /// This is the sending side.
@@ -44,13 +110,24 @@ impl InvCodecSender {
 
 /// Establish a message bus between a local InvBroker and a remote InvBroker.
 /// This is the handler side.
-pub struct InvCodecHandler;
+pub struct InvCodecHandler(Box<dyn AsInvCodecHandler>);
+
+impl InvCodecHandler {
+    /*
+    /// Handle incoming codec messages.
+    pub fn handle<
+        NewImplSpecCb
+    >(self: Box<Self>, _new_impl_spec_cb: NewImplSpecCb)
+    where
+        NewImplSpecCb: Fn(ImplSpec)
+    */
+}
 
 /// Create a codec message bus between a local InvBroker and a remote InvBroker.
 pub fn inv_codec<R, W>(r: R, w: W) -> (InvCodecSender, InvCodecHandler)
 where
     R: tokio::io::AsyncRead + 'static + Send,
-    W: tokio::io::AsyncWrite + 'static + Send,
+    W: tokio::io::AsyncWrite + 'static + Send + Unpin,
 {
     use tokio_util::codec::*;
 
@@ -62,7 +139,7 @@ where
 
     struct S<W>
     where
-        W: tokio::io::AsyncWrite + 'static + Send,
+        W: tokio::io::AsyncWrite + 'static + Send + Unpin,
     {
         limit: Arc<tokio::sync::Semaphore>,
         inner: Arc<Mutex<Option<FramedWrite<W, LengthDelimitedCodec>>>>,
@@ -70,11 +147,11 @@ where
 
     impl<W> AsInvCodecSender for S<W>
     where
-        W: tokio::io::AsyncWrite + 'static + Send,
+        W: tokio::io::AsyncWrite + 'static + Send + Unpin,
     {
         fn new_impl_spec(
             &self,
-            _impl_spec: ImplSpec,
+            impl_spec: ImplSpec,
         ) -> BoxFuture<'static, InvResult<()>> {
             let limit = self.limit.clone();
             let inner = self.inner.clone();
@@ -84,13 +161,29 @@ where
                     .acquire_owned()
                     .await
                     .map_err(InvError::other)?;
-                // if we have a permit, the sender is available
-                let raw_send = inner.lock().take().unwrap();
 
-                // TODO - send impl_spec
+                // if we have a permit, the sender is available
+                let mut raw_send = inner.lock().take().unwrap();
+
+                //let uniq = InvUniq::new_rand();
+
+                // TODO - register this uniq so we can reference later
+
+                let encoded = InvCodecMessage::NewImplSpec {
+                    //ref_id: uniq,
+                    impl_spec,
+                }
+                .encode();
+
+                let res = raw_send
+                    .send(encoded.into())
+                    .await
+                    .map_err(InvError::other);
 
                 *(inner.lock()) = Some(raw_send);
-                Ok(())
+
+                // TODO - on error close the channel
+                res
             }
             .boxed()
         }
@@ -101,7 +194,11 @@ where
         inner: Arc::new(Mutex::new(Some(w))),
     }));
 
-    let h = InvCodecHandler;
+    struct H;
+
+    impl AsInvCodecHandler for H {}
+
+    let h = InvCodecHandler(Box::new(H));
 
     (s, h)
 }
