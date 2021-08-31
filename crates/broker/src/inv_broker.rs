@@ -133,7 +133,14 @@ pub mod traits {
 
     /// inversion broker trait
     pub trait AsInvBroker: 'static + Send + Sync {
+        /// Get the inv api impl spec that defines this brokers implemented api.
+        fn get_inv_api_impl_spec(&self) -> ImplSpec;
+
+        /// Obtain a handle to this broker's raw inv api implementation.
+        fn bind_to_inv_api_impl_raw(&self) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>;
+
         /// Register a new api impl to this broker
+        #[deprecated]
         fn register_impl_raw(
             &self,
             impl_spec: ImplSpec,
@@ -142,6 +149,7 @@ pub mod traits {
         /// Bind to a registered api implementation
         /// TODO - for now we only support this binding to an exact impl,
         ///        someday we can add ApiSpec / feature matching.
+        #[deprecated]
         fn bind_to_impl_raw(
             &self,
             impl_spec: ImplSpec,
@@ -854,11 +862,22 @@ impl std::ops::Deref for InvBroker {
 }
 
 impl InvBroker {
+    /// Get the inv api impl spec that defines this brokers implemented api.
+    pub fn get_inv_api_impl_spec(&self) -> ImplSpec {
+        self.0.get_inv_api_impl_spec()
+    }
+
+    /// Obtain a handle to this broker's raw inv api implementation.
+    pub fn bind_to_inv_api_impl_raw(&self) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>> {
+        self.0.bind_to_inv_api_impl_raw()
+    }
+
     /// Register a new api impl to this broker
     pub fn register_impl_raw(
         &self,
         impl_spec: ImplSpec,
     ) -> impl Future<Output = InvResult<InvFactoryHandler>> {
+        #[allow(deprecated)]
         self.0.register_impl_raw(impl_spec)
     }
 
@@ -870,6 +889,7 @@ impl InvBroker {
         impl_spec: ImplSpec,
     ) -> impl Future<Output = InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>
     {
+        #[allow(deprecated)]
         self.0.bind_to_impl_raw(impl_spec)
     }
 }
@@ -902,6 +922,16 @@ impl PrivBroker {
 }
 
 impl AsInvBroker for PrivBroker {
+    fn get_inv_api_impl_spec(&self) -> ImplSpec {
+        crate::inv_api_impl::INV_API_IMPL.clone()
+    }
+
+    fn bind_to_inv_api_impl_raw(&self) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>> {
+        async move {
+            unimplemented!()
+        }.boxed()
+    }
+
     fn register_impl_raw(
         &self,
         impl_spec: ImplSpec,
