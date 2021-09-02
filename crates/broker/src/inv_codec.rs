@@ -1,14 +1,69 @@
 //! inversion engine serialization codec
 
+use crate::inv_any::*;
+use crate::inv_api_spec::*;
+use crate::inv_error::*;
+use crate::inv_uniq::*;
+
+/// Serialization codec for InversionApi Events.
+/// Both sides can emit these events, both sides can receive them.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InvApiCodecEvt {
+    /// Notify the remote end of a new local ImplSpec
+    /// On new binding, both sides should emit events of this
+    /// type for all pre-existing local specs.
+    NewImplSpec {
+        /// the ImplSpec
+        impl_spec: ImplSpec,
+    },
+
+    /// a bus message from a bound protocol
+    BoundMessage {
+        /// the uniq id associated with this binding
+        binding_id: InvUniq,
+
+        /// the msg_id for this specific message
+        msg_id: InvUniq,
+
+        /// the data content of this message
+        data: InvAny,
+    },
+}
+
+/// Serialization codec for InversionApi Requests and Responses.
+/// Both sides can send all requests and responses,
+/// both sides can receive all requests and responses.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InvApiCodecReqRes {
+    /// A process local to the sender of this message is requesting
+    /// to bind to an Impl on the receiver of this message.
+    NewImplBindingReq {
+        /// a uniq id to use for messages related to this binding
+        binding_id: InvUniq,
+
+        /// the impl id to bind to
+        impl_id: ImplSpecId,
+    },
+
+    /// if the binding was successful, return this message
+    NewImplBindingRes {
+        /// the uniq binding_id sent with the Req
+        binding_id: InvUniq,
+
+        /// if None, the result was a success.
+        /// if Some, the result of the binding was an error.
+        error: Option<InvError>,
+    },
+}
+
+/*
 use futures::future::{BoxFuture, FutureExt};
 use futures::sink::SinkExt;
 
 use parking_lot::Mutex;
 
-use crate::inv_any::*;
-use crate::inv_api_spec::*;
-use crate::inv_error::*;
-use crate::inv_uniq::*;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -33,53 +88,6 @@ pub mod traits {
     pub trait AsInvCodecHandler: 'static + Send {}
 }
 use traits::*;
-
-/// Serialization format for InvCodec Message Bus.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum InvCodecMessage {
-    /// Notify the remote end of a new local ImplSpec
-    NewImplSpec {
-        /// the ImplSpec
-        impl_spec: ImplSpec,
-    },
-
-    /// A process local to the sender of this message is requesting
-    /// to bind to an Impl on the receiver of this message.
-    NewImplBindingReq {
-        /// the request id for relating the result of the binding
-        req_id: InvUniq,
-
-        /// a uniq id to use for messages related to this binding
-        binding_id: InvUniq,
-
-        /// the impl id to bind to
-        impl_id: ImplSpecId,
-    },
-
-    /// if the binding was successful, return this message
-    NewImplBindingRes {
-        /// the uniq binding_id sent with the Req
-        binding_id: InvUniq,
-
-        /// if None, the result was a success.
-        /// if Some, the result of the binding was an error,
-        /// this string will be the error reason.
-        error: Option<Box<str>>,
-    },
-
-    /// a bus message from a bound protocol
-    BoundMessage {
-        /// the uniq id associated with this binding
-        binding_id: InvUniq,
-
-        /// the msg_id for this specific message
-        msg_id: InvUniq,
-
-        /// the data content of this message
-        data: InvAny,
-    },
-}
 
 impl InvCodecMessage {
     /// Serialize
@@ -202,3 +210,4 @@ where
 
     (s, h)
 }
+*/

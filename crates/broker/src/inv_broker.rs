@@ -2,6 +2,7 @@
 
 use crate::inv_any::InvAny;
 use crate::inv_api_spec::*;
+use crate::inv_codec::*;
 use crate::inv_error::*;
 use crate::inv_share::InvShare;
 use crate::inv_uniq::InvUniq;
@@ -137,7 +138,12 @@ pub mod traits {
         fn get_inv_api_impl_spec(&self) -> ImplSpec;
 
         /// Obtain a handle to this broker's raw inv api implementation.
-        fn bind_to_inv_api_impl_raw(&self) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>;
+        fn bind_to_inv_api_impl_raw(
+            &self,
+        ) -> BoxFuture<
+            'static,
+            InvResult<(InvRawSender, InvRawHandler, InvRawClose)>,
+        >;
 
         /// Register a new api impl to this broker
         #[deprecated]
@@ -868,7 +874,10 @@ impl InvBroker {
     }
 
     /// Obtain a handle to this broker's raw inv api implementation.
-    pub fn bind_to_inv_api_impl_raw(&self) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>> {
+    pub fn bind_to_inv_api_impl_raw(
+        &self,
+    ) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>
+    {
         self.0.bind_to_inv_api_impl_raw()
     }
 
@@ -911,13 +920,75 @@ struct PrivBrokerInner {
     map: HashMap<ImplSpec, PrivPendingFactorySender>,
 }
 
+type PrivApiSender =
+    InvTypedSender<InvApiCodecEvt, InvApiCodecReqRes, InvApiCodecReqRes>;
+
+type PrivApiHandler =
+    InvTypedHandler<InvApiCodecEvt, InvApiCodecReqRes, InvApiCodecReqRes>;
+
 struct PrivBroker(InvShare<PrivBrokerInner>);
 
 impl PrivBroker {
     pub fn new() -> Self {
-        Self(InvShare::new_rw_lock(PrivBrokerInner {
+        let out = InvShare::new_rw_lock(PrivBrokerInner {
             map: HashMap::new(),
-        }))
+        });
+        let inner = out.clone();
+
+        let self_factory: InvFactoryHandlerCbDyn =
+            Arc::new(move |raw_sender, raw_handler, raw_close| {
+                let _inner = &inner;
+                let (_sender, handler): (PrivApiSender, PrivApiHandler) =
+                    upgrade_inv_raw_channel(raw_sender, raw_handler, raw_close);
+                handler.handle(move |incoming| match incoming {
+                    InvTypedIncoming::Event(evt) => match evt {
+                        InvApiCodecEvt::NewImplSpec { impl_spec: _ } => {
+                            async move { Ok(()) }.boxed()
+                        }
+                        InvApiCodecEvt::BoundMessage {
+                            binding_id: _,
+                            msg_id: _,
+                            data: _,
+                        } => async move { Ok(()) }.boxed(),
+                    },
+                    InvTypedIncoming::Request(req, res) => match req {
+                        InvApiCodecReqRes::NewImplBindingReq {
+                            binding_id,
+                            impl_id: _,
+                        } => {
+                            let fut = res.respond(
+                                InvApiCodecReqRes::NewImplBindingRes {
+                                    binding_id,
+                                    error: Some(InvError::from(
+                                        "unimplemented",
+                                    )),
+                                },
+                            );
+                            async move {
+                                fut.await;
+                                Ok(())
+                            }
+                            .boxed()
+                        }
+                        InvApiCodecReqRes::NewImplBindingRes {
+                            binding_id: _,
+                            error: _,
+                        } => async move { Ok(()) }.boxed(),
+                    },
+                });
+                Ok(())
+            });
+
+        out.share_mut(move |i, _| {
+            i.map.insert(
+                crate::inv_api_impl::INV_API_IMPL.clone(),
+                PrivPendingFactorySender::Ready(self_factory),
+            );
+            Ok(())
+        })
+        .expect("unexpected closed share in constructor");
+
+        Self(out)
     }
 }
 
@@ -926,10 +997,11 @@ impl AsInvBroker for PrivBroker {
         crate::inv_api_impl::INV_API_IMPL.clone()
     }
 
-    fn bind_to_inv_api_impl_raw(&self) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>> {
-        async move {
-            unimplemented!()
-        }.boxed()
+    fn bind_to_inv_api_impl_raw(
+        &self,
+    ) -> BoxFuture<'static, InvResult<(InvRawSender, InvRawHandler, InvRawClose)>>
+    {
+        async move { unimplemented!() }.boxed()
     }
 
     fn register_impl_raw(
